@@ -1,7 +1,15 @@
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
+
+
+if sys.version_info[:2] != (3, 14):
+    raise RuntimeError(
+        "MandateMesh development and Docker environments require Python 3.14. "
+        f"Detected {sys.version_info.major}.{sys.version_info.minor}."
+    )
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -14,4 +22,3 @@ MODEL_BASE_URL = os.getenv("MODEL_BASE_URL", "https://api.openai.com/v1").rstrip
 MODEL_NAME = os.getenv("MODEL_NAME", "gpt-4.1-mini")
 MODEL_TEMPERATURE = float(os.getenv("MODEL_TEMPERATURE", "0.1"))
 MODEL_TIMEOUT_SECONDS = float(os.getenv("MODEL_TIMEOUT_SECONDS", "12"))
-
