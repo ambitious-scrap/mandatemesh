@@ -24,6 +24,7 @@ services:
     restart: unless-stopped
     environment:
       MANDATEMESH_DATA_DIR: /app/data
+      MANDATEMESH_KEY_PATH: ${MANDATEMESH_KEY_PATH:-/app/data/demo-principal-ed25519.key}
       MODEL_API_KEY: ${MODEL_API_KEY:-}
       MODEL_BASE_URL: ${MODEL_BASE_URL:-https://api.openai.com/v1}
       MODEL_NAME: ${MODEL_NAME:-gpt-4.1-mini}
@@ -42,7 +43,7 @@ services:
         - "CMD"
         - "python"
         - "-c"
-        - "import json,urllib.request; exit(0 if json.load(urllib.request.urlopen('http://127.0.0.1:8000/health'))['opa']['reachable'] else 1)"
+        - "import json,urllib.request; exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/ready').status == 200 else 1)"
       interval: 5s
       timeout: 3s
       retries: 15

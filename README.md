@@ -80,11 +80,14 @@ cp .env.example .env
 | `MODEL_TEMPERATURE` | `0.1` | Live-model sampling temperature. |
 | `MODEL_TIMEOUT_SECONDS` | `12` | Live-model request timeout. |
 | `NEXT_PUBLIC_API_URL` | `http://localhost:8000` | Base URL the **browser** uses to reach the API. |
+| `MANDATEMESH_KEY_PATH` | `<data-dir>/demo-principal-ed25519.key` | Persistent random Ed25519 demo-principal key. Leave blank to use the data directory default. |
 | `OPA_URL` | `http://localhost:8181` | Policy decision point. Under Compose the API uses `http://opa:8181` automatically. |
 
 `.env` contains no secrets by default and is safe to keep local. Never commit a
-populated `.env`. The demo principal's Ed25519 **signing key never leaves the
-backend** and is never exposed as an agent tool or environment secret.
+populated `.env`. On first startup the backend generates a random Ed25519 demo
+principal key at `MANDATEMESH_KEY_PATH`; Compose keeps it in the existing data
+volume. The private key never enters source control, API responses, events,
+prompts, or the agent tool surface.
 
 ---
 
@@ -97,11 +100,11 @@ docker compose up --build
 This builds and starts three services with health checks and a persistent volume:
 
 - **Web UI** → http://localhost:3000
-- **API** → http://localhost:8000 (health at http://localhost:8000/health)
+- **API** → http://localhost:8000 (liveness at `/health`, protected readiness at `/ready`)
 - **OPA** → policy decision point, **internal network only** (no host port)
 
 `opa` publishes no host port — only the trusted API can reach it. The `api`
-health check reports healthy only once the API is up **and** OPA is reachable,
+`/ready` reports healthy only once the API is up **and** OPA is reachable,
 and the `web` service waits for that health check before starting. Open
 http://localhost:3000 and run the demo (see [Using the demo](#using-the-demo)).
 
@@ -298,7 +301,8 @@ Base URL: `http://localhost:8000`
 
 | Method | Path | Purpose |
 |--------|------|---------|
-| `GET`  | `/health` | Liveness check; reports OPA reachability. |
+| `GET`  | `/health` | Liveness/degraded status; unprotected mode remains inspectable without OPA. |
+| `GET`  | `/ready` | Protected-stack readiness; returns HTTP 503 when OPA is unavailable. |
 | `GET`  | `/api/scenarios` | List available invoice scenarios. |
 | `POST` | `/api/mandates/compile` | Compile a human task into a draft mandate contract. |
 | `GET`  | `/api/mandates` · `/api/mandates/{id}` | List / fetch mandates. |

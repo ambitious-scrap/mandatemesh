@@ -7,9 +7,9 @@ import threading
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
-from . import approvals, gateway, mandates, policy
+from . import approvals, crypto, gateway, mandates, policy
 from .agent import create_run, execute_run, get_run, resume_after_approval
 from .config import OPA_URL
 from .database import DB_PATH, connect, init_db, reset_db, rows, utc_now
@@ -38,6 +38,7 @@ app.add_middleware(
 @app.on_event("startup")
 def startup() -> None:
     init_db()
+    crypto.ensure_key()
     if not rows("SELECT id FROM vendors LIMIT 1"):
         reset_db()
 
@@ -46,13 +47,27 @@ def startup() -> None:
 def health() -> dict:
     with connect() as connection:
         connection.execute("CREATE TEMP TABLE IF NOT EXISTS health_probe (ok INTEGER)")
+    opa_reachable = policy.opa_healthy()
     return {
-        "status": "ok",
+        "status": "ok" if opa_reachable else "degraded",
         "database": "writable",
         "journal_mode": "wal",
         "database_path": str(DB_PATH),
-        "opa": {"url": OPA_URL, "reachable": policy.opa_healthy()},
+        "protected_ready": opa_reachable,
+        "opa": {"url": OPA_URL, "reachable": opa_reachable},
     }
+
+
+@app.get("/ready")
+def ready() -> JSONResponse:
+    opa_reachable = policy.opa_healthy()
+    payload = {
+        "status": "ready" if opa_reachable else "not_ready",
+        "database": "writable",
+        "protected_ready": opa_reachable,
+        "opa": {"url": OPA_URL, "reachable": opa_reachable},
+    }
+    return JSONResponse(status_code=200 if opa_reachable else 503, content=payload)
 
 
 @app.get("/api/scenarios")
@@ -191,7 +206,7 @@ async def run_stream(run_id: str) -> StreamingResponse:
                     sent.add(event["id"])
                     yield f"event: tool_event\ndata: {json.dumps(event)}\n\n"
             run = get_run(run_id)
-            if run["status"] in {"COMPLETED", "FAILED"}:
+            if run["status"] in {"COMPLETED", "FAILED", "BLOCKED", "REJECTED"}:
                 yield f"event: run_status\ndata: {json.dumps(run)}\n\n"
                 break
             await asyncio.sleep(0.15)
@@ -230,7 +245,8 @@ def approvals_approve(request_id: str) -> dict:
     except approvals.ApprovalError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
     request = granted["request"]
-    record_event(request["mandate_id"], "APPROVAL_GRANTED", actor="user", mandate_id=request["mandate_id"],
+    event_run_id = request["run_id"] or request["mandate_id"]
+    record_event(event_run_id, "APPROVAL_GRANTED", actor="user", mandate_id=request["mandate_id"],
                  tool_result={"approval_request_id": request_id, "action_hash": granted["action_hash"]})
     response: dict = {"request": request}
     # Resume the paused protected run with the freshly minted, one-use token.
@@ -246,15 +262,16 @@ def approvals_reject(request_id: str) -> dict:
         request = approvals.reject(request_id)
     except approvals.ApprovalError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
-    record_event(request["mandate_id"], "APPROVAL_REJECTED", actor="user", mandate_id=request["mandate_id"],
+    event_run_id = request["run_id"] or request["mandate_id"]
+    record_event(event_run_id, "APPROVAL_REJECTED", actor="user", mandate_id=request["mandate_id"],
                  tool_result={"approval_request_id": request_id})
     if request["run_id"]:
         with connect() as connection:
             connection.execute(
-                "UPDATE runs SET status = 'COMPLETED', completed_at = ? WHERE id = ? AND status = 'AWAITING_APPROVAL'",
-                (utc_now(), request["run_id"]),
+                "UPDATE runs SET status = 'REJECTED', error = ?, completed_at = ? WHERE id = ? AND status = 'AWAITING_APPROVAL'",
+                ("Human rejected the payment approval.", utc_now(), request["run_id"]),
             )
-        record_event(request["run_id"], "RUN_COMPLETED", actor="agent",
+        record_event(request["run_id"], "RUN_REJECTED", actor="user", mandate_id=request["mandate_id"],
                      tool_result={"outcome": "approval_rejected"})
     return {"request": request}
 
