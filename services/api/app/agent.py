@@ -5,7 +5,7 @@ import time
 import urllib.request
 import uuid
 
-from . import config
+from . import config, gateway, mandates
 from .database import APPROVED_VENDOR, connect, utc_now
 from .events import record_event
 from .scenarios import get_scenario
@@ -80,11 +80,20 @@ def live_model_plan(scenario: dict, task: str, run_id: str) -> list[dict]:
     return normalized
 
 
-def create_run(scenario_id: str, requested_mode: str, task: str) -> dict:
+def create_run(
+    scenario_id: str,
+    requested_mode: str,
+    task: str,
+    *,
+    protection_mode: str = "UNPROTECTED",
+    mandate_id: str | None = None,
+) -> dict:
     scenario = get_scenario(scenario_id)
     run = {
         "id": str(uuid.uuid4()),
         "scenario_id": scenario_id,
+        "protection_mode": protection_mode,
+        "mandate_id": mandate_id,
         "requested_mode": requested_mode,
         "execution_mode": requested_mode,
         "task": task,
@@ -94,11 +103,12 @@ def create_run(scenario_id: str, requested_mode: str, task: str) -> dict:
     with connect() as connection:
         connection.execute(
             """INSERT INTO runs
-            (id, scenario_id, requested_mode, execution_mode, task, status, created_at)
-            VALUES (:id, :scenario_id, :requested_mode, :execution_mode, :task, :status, :created_at)""",
+            (id, scenario_id, protection_mode, mandate_id, requested_mode, execution_mode, task, status, created_at)
+            VALUES (:id, :scenario_id, :protection_mode, :mandate_id, :requested_mode, :execution_mode, :task, :status, :created_at)""",
             run,
         )
-    record_event(run["id"], "RUN_STARTED", actor="user", source_ref=scenario["invoice"]["invoice_id"], tool_result={"scenario_id": scenario_id, "requested_mode": requested_mode})
+    record_event(run["id"], "RUN_STARTED", actor="user", mandate_id=mandate_id, source_ref=scenario["invoice"]["invoice_id"],
+                 tool_result={"scenario_id": scenario_id, "protection_mode": protection_mode, "requested_mode": requested_mode})
     return get_run(run["id"])
 
 
@@ -110,8 +120,114 @@ def get_run(run_id: str) -> dict:
     return dict(run)
 
 
+def protected_plan(scenario: dict, run_id: str) -> list[dict]:
+    steps = scenario.get("protected_plan") or scenario["deterministic_plan"]
+    return [
+        {
+            "tool_name": item["tool_name"],
+            "arguments": {
+                key: value.replace("{run_id}", run_id) if isinstance(value, str) else value
+                for key, value in item["arguments"].items()
+            },
+        }
+        for item in steps
+    ]
+
+
+def _count_forbidden_proposals(run_id: str) -> int:
+    with connect() as connection:
+        row = connection.execute(
+            "SELECT COUNT(*) AS n FROM tool_events WHERE run_id = ? AND event_type = 'TOOL_PROPOSED' AND is_forbidden = 1",
+            (run_id,),
+        ).fetchone()
+    return int(row["n"])
+
+
+def _complete_protected(run_id: str, source_ref: str) -> None:
+    forbidden = _count_forbidden_proposals(run_id)
+    with connect() as connection:
+        connection.execute(
+            """UPDATE runs SET status = 'COMPLETED', forbidden_proposals = ?, forbidden_side_effects = 0, completed_at = ?
+            WHERE id = ?""",
+            (forbidden, utc_now(), run_id),
+        )
+    record_event(run_id, "RUN_COMPLETED", actor="agent", source_ref=source_ref,
+                 tool_result={"forbidden_proposals": forbidden, "forbidden_side_effects": 0})
+
+
+def execute_protected_run(run_id: str) -> None:
+    run = get_run(run_id)
+    scenario = get_scenario(run["scenario_id"])
+    source_ref = scenario["invoice"]["invoice_id"]
+    mandate_id = run["mandate_id"]
+    try:
+        mandate = mandates.get_mandate(mandate_id) if mandate_id else None
+        verification = mandates.verification_for(mandate) if mandate else None
+        if mandate is None or not verification["valid"]:
+            reason = "No mandate bound to run" if mandate is None else verification["reason_code"]
+            record_event(run_id, "MANDATE_VERIFICATION_FAILED", actor="gateway", mandate_id=mandate_id,
+                         source_ref=source_ref, tool_result={"reason_code": reason})
+            with connect() as connection:
+                connection.execute("UPDATE runs SET status = 'FAILED', error = ?, completed_at = ? WHERE id = ?",
+                                   (f"Protected run requires an active signed mandate ({reason}).", utc_now(), run_id))
+            return
+
+        context: dict = {}
+        for call in protected_plan(scenario, run_id):
+            tool_name = call["tool_name"]
+            arguments = _resolve(call["arguments"], context)
+            forbidden = tool_name in scenario["forbidden_tools"]
+            record_event(run_id, "TOOL_PROPOSED", actor="agent", mandate_id=mandate_id, source_ref=source_ref,
+                         tool_name=tool_name, tool_arguments=arguments, is_forbidden=forbidden)
+            outcome = gateway.execute(
+                run_id, mandate_id, tool_name, arguments, source_ref=source_ref,
+                approval_token=None, idempotency_key=arguments.get("idempotency_key"),
+            )
+            decision = outcome["decision"]["decision"]
+            if decision == "REQUIRE_APPROVAL":
+                # Pause: the gateway set the run to AWAITING_APPROVAL and opened an
+                # approval request. The run resumes when the human approves.
+                return
+            if decision == "ALLOW" and tool_name == "payment.prepare" and outcome["tool_result"]:
+                context["last_payment_id"] = outcome["tool_result"]["id"]
+
+        _complete_protected(run_id, source_ref)
+    except Exception as error:
+        with connect() as connection:
+            connection.execute("UPDATE runs SET status = 'FAILED', error = ?, completed_at = ? WHERE id = ?",
+                               (str(error), utc_now(), run_id))
+        record_event(run_id, "RUN_FAILED", actor="agent", source_ref=source_ref, tool_result={"error": str(error)})
+
+
+def resume_after_approval(run_id: str, payment_id: str, token: str) -> dict:
+    """Continue a paused protected run once an approval token has been minted."""
+    run = get_run(run_id)
+    scenario = get_scenario(run["scenario_id"])
+    source_ref = scenario["invoice"]["invoice_id"]
+    mandate_id = run["mandate_id"]
+
+    execute_step = next(
+        (s for s in protected_plan(scenario, run_id) if s["tool_name"] == "payment.execute"),
+        {"arguments": {"idempotency_key": f"{run_id}-execute"}},
+    )
+    idempotency_key = execute_step["arguments"].get("idempotency_key", f"{run_id}-execute")
+    arguments = {"payment_id": payment_id, "idempotency_key": idempotency_key}
+
+    record_event(run_id, "TOOL_PROPOSED", actor="agent", mandate_id=mandate_id, source_ref=source_ref,
+                 tool_name="payment.execute", tool_arguments=arguments, is_forbidden=False)
+    outcome = gateway.execute(
+        run_id, mandate_id, "payment.execute", arguments, source_ref=source_ref,
+        approval_token=token, idempotency_key=idempotency_key,
+    )
+    _complete_protected(run_id, source_ref)
+    return outcome
+
+
 def execute_run(run_id: str) -> None:
     run = get_run(run_id)
+    if run["protection_mode"] == "PROTECTED":
+        execute_protected_run(run_id)
+        return
     scenario = get_scenario(run["scenario_id"])
     source_ref = scenario["invoice"]["invoice_id"]
     forbidden_proposals = 0

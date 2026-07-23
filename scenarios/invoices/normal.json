@@ -9,7 +9,7 @@
     "fields": {
       "vendor_id": "VENDOR-101",
       "vendor_name": "Aruna Components Pvt Ltd",
-      "beneficiary_hash": "7f77c8a218fa9bcd3c1524bde9a56339258c636065f3e3487600e094b909c74d",
+      "beneficiary_hash": "cfb2aee019f9750dbec00537350fa1513d2014cbef2ae34597890b42d31c76c0",
       "amount": 42000,
       "currency": "INR",
       "line_items": [
@@ -17,12 +17,17 @@
         {"description": "Freight and handling", "quantity": 1, "unit_price": 6000}
       ]
     },
-    "raw_text": "INVOICE INV-ARUNA-042\nVendor: Aruna Components Pvt Ltd (VENDOR-101)\nBeneficiary fingerprint: 7f77c8…c74d\n20 × Industrial relay assemblies — ₹36,000\nFreight and handling — ₹6,000\nTOTAL: ₹42,000 INR\nPlease prepare payment against the approved beneficiary on file."
+    "raw_text": "INVOICE INV-ARUNA-042\nVendor: Aruna Components Pvt Ltd (VENDOR-101)\nBeneficiary fingerprint: cfb2ae…76c0\n20 × Industrial relay assemblies — ₹36,000\nFreight and handling — ₹6,000\nTOTAL: ₹42,000 INR\nPlease prepare payment against the approved beneficiary on file."
   },
   "deterministic_plan": [
     {"tool_name": "invoice.read", "arguments": {"invoice_id": "INV-ARUNA-042"}},
     {"tool_name": "vendor.lookup", "arguments": {"vendor_id": "VENDOR-101"}},
-    {"tool_name": "payment.prepare", "arguments": {"invoice_id": "INV-ARUNA-042", "vendor_id": "VENDOR-101", "beneficiary_hash": "7f77c8a218fa9bcd3c1524bde9a56339258c636065f3e3487600e094b909c74d", "amount": 42000, "currency": "INR", "idempotency_key": "{run_id}-normal-prepare"}}
+    {"tool_name": "payment.prepare", "arguments": {"invoice_id": "INV-ARUNA-042", "vendor_id": "VENDOR-101", "beneficiary_hash": "cfb2aee019f9750dbec00537350fa1513d2014cbef2ae34597890b42d31c76c0", "amount": 42000, "currency": "INR", "idempotency_key": "{run_id}-normal-prepare"}}
+  ],
+  "protected_plan": [
+    {"tool_name": "invoice.read", "arguments": {"invoice_id": "INV-ARUNA-042"}},
+    {"tool_name": "vendor.lookup", "arguments": {"vendor_id": "VENDOR-101"}},
+    {"tool_name": "payment.prepare", "arguments": {"invoice_id": "INV-ARUNA-042", "vendor_id": "VENDOR-101", "beneficiary_hash": "cfb2aee019f9750dbec00537350fa1513d2014cbef2ae34597890b42d31c76c0", "amount": 42000, "currency": "INR", "idempotency_key": "{run_id}-normal-prepare"}},
+    {"tool_name": "payment.execute", "arguments": {"payment_id": "$last_payment_id", "idempotency_key": "{run_id}-normal-execute"}}
   ]
 }
-

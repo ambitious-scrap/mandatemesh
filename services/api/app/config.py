@@ -22,3 +22,12 @@ MODEL_BASE_URL = os.getenv("MODEL_BASE_URL", "https://api.openai.com/v1").rstrip
 MODEL_NAME = os.getenv("MODEL_NAME", "gpt-4.1-mini")
 MODEL_TEMPERATURE = float(os.getenv("MODEL_TEMPERATURE", "0.1"))
 MODEL_TIMEOUT_SECONDS = float(os.getenv("MODEL_TIMEOUT_SECONDS", "12"))
+
+# OPA policy decision point (Level 1). The gateway is the only trusted caller.
+OPA_URL = os.getenv("OPA_URL", "http://localhost:8181").rstrip("/")
+OPA_DECISION_PATH = os.getenv("OPA_DECISION_PATH", "/v1/data/mandatemesh/authz/decision")
+OPA_TIMEOUT_SECONDS = float(os.getenv("OPA_TIMEOUT_SECONDS", "5"))
+
+# Mandate lifecycle defaults (Level 1).
+MANDATE_TTL_SECONDS = int(os.getenv("MANDATE_TTL_SECONDS", str(60 * 60 * 8)))
+APPROVAL_TTL_SECONDS = int(os.getenv("APPROVAL_TTL_SECONDS", str(60 * 5)))
