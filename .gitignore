@@ -1,0 +1,23 @@
+.DS_Store
+.env
+.env.local
+.venv/
+__pycache__/
+.pytest_cache/
+*.py[cod]
+*.sqlite3
+*.sqlite3-shm
+*.sqlite3-wal
+
+node_modules/
+.next/
+coverage/
+playwright-report/
+test-results/
+
+.frontend-slides/
+.memsearch/
+.serena/
+.superpowers/
+Presentation legacy files/
+
