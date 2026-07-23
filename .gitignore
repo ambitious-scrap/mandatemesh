@@ -15,9 +15,12 @@ coverage/
 playwright-report/
 test-results/
 
+.claude/
 .frontend-slides/
 .memsearch/
 .serena/
 .superpowers/
 Presentation legacy files/
+
+data/
 

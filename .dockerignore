@@ -1,0 +1,49 @@
+# Version control and CI
+.git
+.gitignore
+.github
+
+# Python runtime and caches
+.venv
+**/__pycache__
+**/*.pyc
+**/.pytest_cache
+**/.mypy_cache
+**/.ruff_cache
+
+# Node / Next.js build artifacts
+**/node_modules
+**/.next
+**/dist
+**/build
+
+# Local database and persisted state
+data
+*.sqlite3
+*.sqlite3-shm
+*.sqlite3-wal
+*.db
+
+# Secrets and local env (keep the example)
+.env
+.env.*
+!.env.example
+
+# Editor / OS / coverage cruft
+.DS_Store
+coverage
+htmlcov
+
+# Tooling and non-shippable material
+.claude
+.serena
+.memsearch
+.superpowers
+.frontend-slides
+Presentation legacy files
+
+# Docs not needed inside images
+README.md
+PRODUCT_SPEC.md
+BUILD_PLAN.md
+AGENTS.md
