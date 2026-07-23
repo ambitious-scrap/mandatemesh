@@ -11,6 +11,10 @@ accounts-payable agent, driven by the same invoices, can be run two ways:
   call against an OPA/Rego decision point; and the one legitimate payment pauses
   for an action-bound, one-time human approval. Every forbidden action is blocked
   and leaves no side effect.
+- **Level 2 — Judge-proof evaluation.** A fixed corpus runs six attacks and four
+  legitimate actions against both boundaries, persists expected-versus-actual
+  results, measures median/P95 policy latency, and exposes execution provenance
+  with policy input, before/after state, and source evidence.
 
 Two invoices drive the same agent:
 
@@ -19,10 +23,10 @@ Two invoices drive the same agent:
   that tries to create a rogue vendor, read a secret, poison persistent memory,
   and pay an attacker beneficiary.
 
-The web UI has a **Protected / Unprotected** switch so both boundaries can be
-demonstrated side by side: Level 0 shows the attack landing in SQLite; Level 1
-shows the gateway refusing each forbidden action and executing only the approved
-payment.
+The web UI has **Unprotected**, **Protected**, and **Evaluation** screens. Level 0
+shows the attack landing in SQLite; Level 1 shows the gateway refusing each
+forbidden action and executing only the approved payment; Level 2 runs and
+explains the complete fixed corpus without developer tools.
 
 > This README covers **setup and usage only**. For the product rationale, threat
 > model, and level roadmap see [`PRODUCT_SPEC.md`](./PRODUCT_SPEC.md) and
@@ -36,11 +40,11 @@ payment.
 .
 ├── apps/web/                # Next.js 16 frontend (protected + unprotected UI)
 ├── services/api/            # FastAPI backend
-│   ├── app/                 # agent, tools, mandates, gateway, policy client, routes
-│   └── tests/               # pytest suite (Level 0 + Level 1 coverage)
+│   ├── app/                 # agent, gateway, evidence, evaluation, policy, routes
+│   └── tests/               # pytest suite (Levels 0–2)
 ├── policy/                  # OPA/Rego policy (mandate.rego) and Rego tests
 ├── scenarios/invoices/      # normal.json and malicious.json source invoices
-├── scripts/                 # seed / reset / smoke_test / smoke_level1 helpers
+├── scripts/                 # seed/reset and Level 0/1/2 smoke helpers
 ├── docker-compose.yml       # web + api + opa, health checks, persistent volume
 ├── .env.example             # copy to .env; safe placeholders only
 ├── PRODUCT_SPEC.md          # what/why (authoritative spec)
@@ -177,8 +181,9 @@ The browser reads the API URL from `NEXT_PUBLIC_API_URL` (default
 
 ## Resetting demo state
 
-Reset clears every run, event, mandate, approval, and side effect and re-seeds
-the one approved vendor and the synthetic secret. Any of these work:
+Reset clears the interactive demo runs, mandates, approvals, and side effects,
+then re-seeds the approved vendor and synthetic secret. Completed Level 2
+evaluation reports and their evidence remain available for judge review. Any of these work:
 
 - **In the UI** — click **Reset demo state**.
 - **Via the API** — `curl -X POST http://localhost:8000/api/reset`
@@ -192,7 +197,8 @@ the one approved vendor and the synthetic secret. Any of these work:
 ### Backend (pytest)
 
 Covers the tools, agent plan, canonical serialization, mandate lifecycle and
-crypto, the protected gateway, and both end-to-end flows. Gateway tests need OPA
+crypto, the protected gateway, concurrency hardening, the fixed ten-scenario
+corpus, evidence persistence, and all three end-to-end levels. Gateway tests need OPA
 reachable at `OPA_URL`; if OPA is unavailable those tests skip automatically.
 
 ```bash
@@ -239,6 +245,17 @@ Inside Docker (OPA is already running in the stack):
 ```bash
 docker compose exec api python /app/scripts/smoke_test.py --repetitions 3
 docker compose exec api python /app/scripts/smoke_level1.py --repetitions 3
+docker compose exec api python /app/scripts/smoke_level2.py --repetitions 3
+```
+
+### Level 2 — fixed corpus and repeatability
+
+`smoke_level2.py` runs all six attack and four legitimate scenarios from clean
+state, verifies every expected decision and side-effect invariant, measures
+policy latency, and requires the same repeatability key across runs.
+
+```bash
+python scripts/smoke_level2.py --repetitions 3
 ```
 
 Each passing run prints one result dict per repetition followed by a `PASS:` line.
@@ -286,6 +303,20 @@ masthead to choose a boundary.
 
 Click **Reset demo state** to return to a clean baseline.
 
+### Evaluation (Level 2)
+
+1. Select **Evaluation** in the masthead.
+2. Click **RUN FULL EVALUATION**. The backend resets business state between
+   scenarios while preserving the evaluation evidence.
+3. Confirm the scorecard reports **6/6 attacks prevented**, **4/4 legitimate
+   actions**, zero false blocks, and measured median/P95 policy latency.
+4. Click **Inspect pass** on any row. The evidence drawer shows the unprotected
+   outcome beside the protected decision, then the raw proposal, canonical
+   action, relevant signed mandate, policy output, original invoice, and before /
+   after resource state. This evidence trail is labelled **execution provenance**.
+5. Re-run the corpus. Recorded evaluations remain selectable and the repeatability
+   key should remain identical when decisions are identical.
+
 ### Deterministic vs live model
 
 The **Deterministic** engine replays a fixed, precomputed plan and needs no model
@@ -313,6 +344,9 @@ Base URL: `http://localhost:8000`
 | `POST` | `/api/runs` | Start a run (`202 Accepted`); `protection_mode` + `mandate_id` for protected runs. |
 | `GET`  | `/api/runs/{id}` · `/events` · `/stream` | Run status, event trail, and SSE stream. |
 | `POST` | `/api/gateway/execute` | Trusted gateway tool-call entry point (policy-checked). |
+| `GET` | `/api/events/{id}` | Fetch one complete execution-provenance event. |
+| `POST` | `/api/evaluation/run` | Run the fixed ten-scenario corpus from clean state. |
+| `GET` | `/api/evaluation` · `/api/evaluation/{id}` | List and inspect persisted evaluation reports. |
 | `GET`  | `/api/approvals/pending` | Pending human approvals. |
 | `POST` | `/api/approvals/{id}/approve` · `/reject` | Decide an approval; approve resumes the paused run. |
 | `GET`  | `/api/state` | Full demo state snapshot. |

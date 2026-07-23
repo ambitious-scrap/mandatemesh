@@ -51,6 +51,9 @@ type ToolEvent = {
   canonical_action?: { canonical_action?: string; resource?: Record<string, unknown> } | null;
   decision?: Decision | null;
   policy_version?: string | null;
+  policy_input?: Record<string, unknown> | null;
+  before_state?: Record<string, unknown> | null;
+  after_state?: Record<string, unknown> | null;
   is_forbidden: number;
   latency_ms: number | null;
 };
@@ -120,6 +123,46 @@ type DemoState = {
   memory_entries: Array<Record<string, unknown>>;
   secret_accesses: Array<Record<string, unknown>>;
 };
+
+type EvaluationResult = {
+  id: string;
+  scenario_id: string;
+  category: "ATTACK" | "LEGITIMATE";
+  title: string;
+  expected_decision: "ALLOW" | "BLOCK" | "REQUIRE_APPROVAL";
+  actual_decision: "ALLOW" | "BLOCK" | "REQUIRE_APPROVAL" | "ERROR";
+  reason_code: string | null;
+  passed: boolean;
+  baseline_run_id: string;
+  protected_run_id: string;
+  baseline_outcome: string;
+  protected_outcome: string;
+  baseline_event_id: string;
+  evidence_event_id: string;
+  latency_ms: number | null;
+  side_effect_detected: boolean;
+  details: Record<string, unknown>;
+};
+
+type EvaluationReport = {
+  id: string;
+  status: string;
+  started_at: string;
+  completed_at: string | null;
+  total_scenarios: number;
+  passed_scenarios: number;
+  attack_prevented: number;
+  legitimate_succeeded: number;
+  false_blocks: number;
+  approval_escalations: number;
+  median_policy_latency_ms: number | null;
+  p95_policy_latency_ms: number | null;
+  repeatability_key: string | null;
+  error: string | null;
+  results: EvaluationResult[];
+};
+
+type EvaluationSummary = Omit<EvaluationReport, "results">;
 
 const emptyState: DemoState = { vendors: [], payments: [], memory_entries: [], secret_accesses: [] };
 
@@ -826,26 +869,231 @@ function ProtectedView() {
   );
 }
 
+function EvaluationView() {
+  const [report, setReport] = useState<EvaluationReport | null>(null);
+  const [history, setHistory] = useState<EvaluationSummary[]>([]);
+  const [scenarios, setScenarios] = useState<Scenario[]>([]);
+  const [selectedResult, setSelectedResult] = useState<EvaluationResult | null>(null);
+  const [protectedEvent, setProtectedEvent] = useState<ToolEvent | null>(null);
+  const [baselineEvent, setBaselineEvent] = useState<ToolEvent | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const loadReport = useCallback(async (id: string) => {
+    const next = await api<EvaluationReport>(`/api/evaluation/${id}`);
+    setReport(next);
+    setSelectedResult(null);
+    setProtectedEvent(null);
+    setBaselineEvent(null);
+  }, []);
+
+  const refreshHistory = useCallback(async () => {
+    const items = await api<EvaluationSummary[]>("/api/evaluation");
+    setHistory(items);
+    return items;
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    Promise.all([
+      api<Scenario[]>("/api/scenarios"),
+      api<EvaluationSummary[]>("/api/evaluation"),
+    ])
+      .then(async ([scenarioItems, evaluationItems]) => {
+        if (!active) return;
+        setScenarios(scenarioItems);
+        setHistory(evaluationItems);
+        if (evaluationItems[0]) {
+          const latest = await api<EvaluationReport>(`/api/evaluation/${evaluationItems[0].id}`);
+          if (active) setReport(latest);
+        }
+      })
+      .catch((reason: Error) => { if (active) setError(reason.message); });
+    return () => { active = false; };
+  }, []);
+
+  async function runAll() {
+    setBusy(true);
+    setError(null);
+    try {
+      const next = await api<EvaluationReport>("/api/evaluation/run", {
+        method: "POST",
+        body: JSON.stringify({ clean_start: true }),
+      });
+      setReport(next);
+      await refreshHistory();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Evaluation failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function inspect(result: EvaluationResult) {
+    setSelectedResult(result);
+    setError(null);
+    try {
+      const [protectedDetail, baselineDetail] = await Promise.all([
+        api<ToolEvent>(`/api/events/${result.evidence_event_id}`),
+        api<ToolEvent>(`/api/events/${result.baseline_event_id}`),
+      ]);
+      setProtectedEvent(protectedDetail);
+      setBaselineEvent(baselineDetail);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Evidence could not be loaded");
+    }
+  }
+
+  const source = useMemo(() => {
+    const sourceRef = protectedEvent?.source_ref;
+    return scenarios.find((item) => item.invoice.invoice_id === sourceRef) ?? null;
+  }, [protectedEvent, scenarios]);
+
+  const completed = report?.status === "COMPLETED";
+  const allPassed = completed && report?.passed_scenarios === report?.total_scenarios;
+
+  return (
+    <>
+      <section className="intro evaluation-intro" id="top">
+        <div>
+          <p className="eyebrow"><span>LEVEL 2</span> FIXED CORPUS / EXECUTION PROVENANCE</p>
+          <h1>Security claims,<br /><em>measured.</em></h1>
+          <p className="lede">Ten fixed scenarios run against both boundaries. Every result persists with the raw proposal, canonical action, policy input, decision, before/after state, and latency.</p>
+        </div>
+        <div className="evaluation-launch">
+          <small>JUDGE-PROOF CHECKPOINT</small>
+          <strong>{report ? `${report.passed_scenarios}/${report.total_scenarios}` : "—/10"}</strong>
+          <span className={allPassed ? "evaluation-pass" : "evaluation-pending"}>{allPassed ? "ALL SCENARIOS PASS" : busy ? "RUNNING CORPUS" : "READY TO EVALUATE"}</span>
+          <button className="run-button" onClick={runAll} disabled={busy}>{busy ? "RUNNING 10 SCENARIOS…" : "RUN FULL EVALUATION"}</button>
+        </div>
+      </section>
+
+      {error && <div className="error-banner" role="alert"><strong>Evaluation error</strong><span>{error}</span></div>}
+
+      <section className="evaluation-metrics" aria-label="Evaluation metrics">
+        <div><small>Attacks prevented</small><b>{report ? `${report.attack_prevented}/6` : "—"}</b></div>
+        <div><small>Legitimate actions</small><b>{report ? `${report.legitimate_succeeded}/4` : "—"}</b></div>
+        <div><small>False blocks</small><b>{report?.false_blocks ?? "—"}</b></div>
+        <div><small>Approval escalations</small><b>{report?.approval_escalations ?? "—"}</b></div>
+        <div><small>Median policy latency</small><b>{report?.median_policy_latency_ms != null ? `${report.median_policy_latency_ms.toFixed(2)} ms` : "—"}</b></div>
+        <div><small>P95 policy latency</small><b>{report?.p95_policy_latency_ms != null ? `${report.p95_policy_latency_ms.toFixed(2)} ms` : "—"}</b></div>
+      </section>
+
+      <div className="evaluation-layout">
+        <section className="evaluation-results">
+          <div className="panel-heading evidence-heading">
+            <span>01</span>
+            <div><h2>Expected versus actual</h2><p>Baseline proves the failure. Protected mode proves the authorization boundary.</p></div>
+            {report?.repeatability_key && <code className="repeatability-key">RUN KEY {shortHash(report.repeatability_key)}</code>}
+          </div>
+
+          {!report ? (
+            <div className="empty-ledger"><div className="empty-mark">10</div><h3>No evaluation recorded</h3><p>Run the corpus to generate inspectable evidence.</p></div>
+          ) : (
+            <div className="evaluation-table-wrap">
+              <table className="evaluation-table">
+                <thead><tr><th>Scenario</th><th>Expected</th><th>Actual</th><th>Baseline</th><th>Protected</th><th>Latency</th><th>Proof</th></tr></thead>
+                <tbody>
+                  {report.results.map((result) => (
+                    <tr key={result.id} className={result.passed ? "result-pass" : "result-fail"}>
+                      <td><span className={`corpus-tag ${result.category.toLowerCase()}`}>{result.scenario_id}</span><b>{result.title}</b></td>
+                      <td><span className={`decision-badge ${decisionClass({ decision: result.expected_decision, reason_code: "" })}`}>{result.expected_decision.replaceAll("_", " ")}</span></td>
+                      <td><span className={`decision-badge ${decisionClass({ decision: result.actual_decision as Decision["decision"], reason_code: result.reason_code ?? "" })}`}>{result.actual_decision.replaceAll("_", " ")}</span><code>{result.reason_code}</code></td>
+                      <td><span className="baseline-outcome">{result.baseline_outcome.replaceAll("_", " ")}</span></td>
+                      <td><span className={result.passed ? "protected-good" : "protected-bad"}>{result.category === "ATTACK" ? (result.side_effect_detected ? "SIDE EFFECT" : "CONTAINED") : (result.passed ? "SUCCEEDED" : "FAILED")}</span></td>
+                      <td><code>{result.latency_ms != null ? `${result.latency_ms.toFixed(2)} ms` : "—"}</code></td>
+                      <td><button className="inspect-btn" onClick={() => inspect(result)}>{result.passed ? "Inspect pass" : "Inspect failure"}</button></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </section>
+
+        <aside className="evaluation-history">
+          <div className="panel-heading"><span>02</span><div><h2>Recorded runs</h2><p>Results survive clean-state resets.</p></div></div>
+          {history.length === 0 ? <p className="empty-state">No recorded evaluations.</p> : history.map((item) => (
+            <button key={item.id} className={report?.id === item.id ? "history-run active" : "history-run"} onClick={() => loadReport(item.id)}>
+              <span><b>{item.passed_scenarios}/{item.total_scenarios} passed</b><small>{stamp(item.started_at)}</small></span>
+              <code>{shortHash(item.repeatability_key)}</code>
+            </button>
+          ))}
+        </aside>
+      </div>
+
+      {selectedResult && protectedEvent && (
+        <section className="evidence-drawer" aria-label="Execution provenance detail">
+          <div className="drawer-head">
+            <div><p className="eyebrow"><span>{selectedResult.scenario_id}</span> EXECUTION PROVENANCE</p><h2>{selectedResult.title}</h2></div>
+            <button onClick={() => { setSelectedResult(null); setProtectedEvent(null); setBaselineEvent(null); }}>Close evidence</button>
+          </div>
+
+          <div className="boundary-comparison">
+            <article className="comparison-card baseline"><small>UNPROTECTED BASELINE</small><strong>{selectedResult.baseline_outcome.replaceAll("_", " ")}</strong><p>Direct tool execution, no authorization boundary.</p></article>
+            <article className="comparison-card protected"><small>MANDATEMESH PROTECTED</small><strong>{selectedResult.actual_decision} · {selectedResult.reason_code}</strong><p>{selectedResult.category === "ATTACK" ? (selectedResult.side_effect_detected ? "A forbidden side effect was detected." : "No forbidden side effect reached persisted state.") : (selectedResult.passed ? "The legitimate action completed under the signed mandate." : "The legitimate action did not complete as expected.")}</p></article>
+          </div>
+
+          <div className="provenance-grid">
+            <article><h3>Raw proposed action</h3><Evidence value={protectedEvent.tool_arguments} /></article>
+            <article><h3>Canonical business action</h3><Evidence value={protectedEvent.canonical_action} /></article>
+            <article><h3>Relevant signed mandate</h3><Evidence value={(protectedEvent.policy_input as { mandate?: unknown } | null)?.mandate ?? null} /></article>
+            <article><h3>Policy output</h3><Evidence value={protectedEvent.decision} /></article>
+            <article><h3>Tool result</h3><Evidence value={protectedEvent.tool_result} /></article>
+            <article><h3>Recorded side effect</h3><Evidence value={protectedEvent.side_effect ?? "NONE — ACTION DID NOT MUTATE STATE"} /></article>
+            <article><h3>Before state</h3><Evidence value={protectedEvent.before_state} /></article>
+            <article><h3>After state</h3><Evidence value={protectedEvent.after_state} /></article>
+          </div>
+
+          <div className="source-and-meta">
+            <details className="raw-source" open><summary>Original invoice text <span>{source?.invoice.invoice_id ?? protectedEvent.source_ref}</span></summary><pre>{source?.invoice.raw_text ?? "Source document unavailable"}</pre></details>
+            <div className="evidence-meta">
+              <div><small>Matched rules</small><code>{protectedEvent.decision && "matched_rules" in protectedEvent.decision ? String((protectedEvent.decision as Decision & { matched_rules?: string[] }).matched_rules?.join(", ") ?? "—") : "—"}</code></div>
+              <div><small>Policy version</small><code>{protectedEvent.policy_version ?? "—"}</code></div>
+              <div><small>Policy latency</small><code>{selectedResult.latency_ms != null ? `${selectedResult.latency_ms.toFixed(3)} ms` : "—"}</code></div>
+              <div><small>Protected run</small><code>{shortHash(selectedResult.protected_run_id)}</code></div>
+              <div><small>Baseline event</small><code>{shortHash(baselineEvent?.id)}</code></div>
+            </div>
+          </div>
+        </section>
+      )}
+
+      <footer><span>Dream Team · InnovaHack Chapter 1</span><span>FIXED CORPUS / LEVEL 2 JUDGE-PROOF</span></footer>
+    </>
+  );
+}
+
 export default function Home() {
-  const [boundary, setBoundary] = useState<"protected" | "unprotected">("protected");
+  const [boundary, setBoundary] = useState<"protected" | "unprotected" | "evaluation">("protected");
+  const subtitle = boundary === "evaluation"
+    ? "Level 2 / evidence and evaluation"
+    : boundary === "protected"
+      ? "Level 1 / protected enforcement"
+      : "Level 0 / unprotected execution";
+  const status = boundary === "evaluation"
+    ? "Fixed corpus ready"
+    : boundary === "protected"
+      ? "Gateway enforcement active"
+      : "Direct tool access enabled";
 
   return (
     <main>
       <header className="masthead">
         <div>
           <a className="wordmark" href="#top" aria-label="MandateMesh home">MANDATE<span>MESH</span></a>
-          <p>{boundary === "protected" ? "Level 1 / protected enforcement" : "Level 0 / unprotected execution"}</p>
+          <p>{subtitle}</p>
         </div>
-        <div className="mode-switch" role="group" aria-label="Execution boundary">
+        <div className="mode-switch" role="group" aria-label="Product screen">
           <button aria-pressed={boundary === "unprotected"} onClick={() => setBoundary("unprotected")}>Unprotected</button>
           <button aria-pressed={boundary === "protected"} onClick={() => setBoundary("protected")}>Protected</button>
+          <button aria-pressed={boundary === "evaluation"} onClick={() => setBoundary("evaluation")}>Evaluation</button>
         </div>
-        <div className={`system-status ${boundary === "protected" ? "protected" : ""}`}>
-          <span aria-hidden="true" /> {boundary === "protected" ? "Gateway enforcement active" : "Direct tool access enabled"}
+        <div className={`system-status ${boundary !== "unprotected" ? "protected" : ""}`}>
+          <span aria-hidden="true" /> {status}
         </div>
       </header>
 
-      {boundary === "protected" ? <ProtectedView /> : <UnprotectedView />}
+      {boundary === "evaluation" ? <EvaluationView /> : boundary === "protected" ? <ProtectedView /> : <UnprotectedView />}
     </main>
   );
 }

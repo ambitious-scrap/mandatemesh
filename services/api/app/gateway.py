@@ -12,7 +12,7 @@ import sqlite3
 import time
 import uuid
 
-from . import actions, approvals, crypto, mandates, policy
+from . import actions, approvals, crypto, evidence, mandates, policy
 from .canonical import canonical_json, sha256_hex
 from .database import connect, rows, utc_now
 from .events import record_event
@@ -77,8 +77,13 @@ def _block(
     canonical: dict | None = None,
     policy_version: str | None = None,
     started: float | None = None,
+    policy_input: dict | None = None,
+    before_state: dict | None = None,
+    after_state: dict | None = None,
 ) -> dict:
     decision = _synthetic_block(reason_code, message)
+    if after_state is None:
+        after_state = evidence.snapshot_resource(tool_name, arguments)
     latency = round((time.perf_counter() - started) * 1000, 3) if started is not None else None
     event = record_event(
         run_id,
@@ -90,6 +95,9 @@ def _block(
         tool_arguments=arguments,
         canonical_action=canonical,
         decision=decision,
+        policy_input=policy_input,
+        before_state=before_state,
+        after_state=after_state,
         policy_version=policy_version,
         is_forbidden=True,
         latency_ms=latency,
@@ -242,6 +250,7 @@ def execute(
         )
 
     canonical_action = canonical["canonical_action"]
+    before_state = evidence.snapshot_resource(tool_name, arguments)
     if canonical_action == "financial.payment.prepare":
         required = ("invoice_id", "vendor_id", "beneficiary_hash", "amount", "currency")
         missing = [name for name in required if arguments.get(name) in (None, "")]
@@ -435,7 +444,9 @@ def execute(
         "approval": approval_snapshot,
     }
 
+    policy_started = time.perf_counter()
     decision = policy.query_decision(policy_input)
+    policy_latency = round((time.perf_counter() - policy_started) * 1000, 3)
     policy_version = decision.get("policy_version")
     record_event(
         run_id,
@@ -447,11 +458,18 @@ def execute(
         tool_arguments=arguments,
         canonical_action=canonical,
         decision=decision,
+        policy_input=policy_input,
+        before_state=before_state,
+        after_state=evidence.snapshot_resource(tool_name, arguments),
         policy_version=policy_version,
+        latency_ms=policy_latency,
     )
 
     if decision["decision"] == "REQUIRE_APPROVAL":
-        return _require_approval(run_id, mandate_id, canonical, payment, source_ref, decision, policy_version)
+        return _require_approval(
+            run_id, mandate_id, canonical, payment, source_ref, decision, policy_version,
+            policy_input=policy_input, before_state=before_state,
+        )
     if decision["decision"] != "ALLOW":
         latency = round((time.perf_counter() - started) * 1000, 3)
         event = record_event(
@@ -464,6 +482,9 @@ def execute(
             tool_arguments=arguments,
             canonical_action=canonical,
             decision=decision,
+            policy_input=policy_input,
+            before_state=before_state,
+            after_state=evidence.snapshot_resource(tool_name, arguments),
             policy_version=policy_version,
             is_forbidden=True,
             latency_ms=latency,
@@ -485,6 +506,8 @@ def execute(
         decision,
         policy_version,
         started,
+        policy_input,
+        before_state,
     )
 
 
@@ -496,6 +519,9 @@ def _require_approval(
     source_ref: str | None,
     decision: dict,
     policy_version: str | None,
+    *,
+    policy_input: dict | None = None,
+    before_state: dict | None = None,
 ) -> dict:
     if payment is None:
         return _block(
@@ -508,6 +534,8 @@ def _require_approval(
             arguments=canonical["arguments"],
             canonical=canonical,
             policy_version=policy_version,
+            policy_input=policy_input,
+            before_state=before_state,
         )
     contract = mandates.get_mandate(mandate_id)["contract"]
     remaining = contract["max_total_payment"] - committed_amount(mandate_id)
@@ -531,6 +559,8 @@ def _require_approval(
             arguments=canonical["arguments"],
             canonical=canonical,
             policy_version=policy_version,
+            policy_input=policy_input,
+            before_state=before_state,
         )
     event = record_event(
         run_id,
@@ -541,6 +571,9 @@ def _require_approval(
         tool_name=canonical["tool_name"],
         canonical_action=canonical,
         decision=decision,
+        policy_input=policy_input,
+        before_state=before_state,
+        after_state=evidence.snapshot_resource(canonical["tool_name"], canonical["arguments"]),
         policy_version=policy_version,
         tool_result={"approval_request_id": request["id"], "action_hash": request["action_hash"]},
     )
@@ -655,6 +688,8 @@ def _execute_allowed(
     decision: dict,
     policy_version: str | None,
     started: float,
+    policy_input: dict | None,
+    before_state: dict | None,
 ) -> dict:
     canonical_action = canonical["canonical_action"]
     if canonical_action == "financial.payment.execute":
@@ -678,6 +713,8 @@ def _execute_allowed(
                 canonical=canonical,
                 policy_version=policy_version,
                 started=started,
+                policy_input=policy_input,
+                before_state=before_state,
             )
     elif canonical_action == "financial.payment.prepare":
         result, side_effect, failure = _prepare_payment_transactionally(
@@ -695,6 +732,8 @@ def _execute_allowed(
                 canonical=canonical,
                 policy_version=policy_version,
                 started=started,
+                policy_input=policy_input,
+                before_state=before_state,
             )
     else:
         try:
@@ -711,6 +750,8 @@ def _execute_allowed(
                 canonical=canonical,
                 policy_version=policy_version,
                 started=started,
+                policy_input=policy_input,
+                before_state=before_state,
             )
 
     latency = round((time.perf_counter() - started) * 1000, 3)
@@ -725,7 +766,11 @@ def _execute_allowed(
         tool_arguments=arguments,
         canonical_action=canonical,
         tool_result={"ok": True, "data": public_result},
+        side_effect=side_effect,
         decision=decision,
+        policy_input=policy_input,
+        before_state=before_state,
+        after_state=evidence.snapshot_resource(tool_name, arguments),
         policy_version=policy_version,
         latency_ms=latency,
     )
@@ -739,6 +784,9 @@ def _execute_allowed(
             tool_name=tool_name,
             canonical_action=canonical,
             side_effect=side_effect,
+            policy_input=policy_input,
+            before_state=before_state,
+            after_state=evidence.snapshot_resource(tool_name, arguments),
             policy_version=policy_version,
         )
     return {"decision": decision, "tool_result": public_result, "event_id": event["id"]}

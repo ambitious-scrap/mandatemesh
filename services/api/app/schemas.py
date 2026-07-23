@@ -58,3 +58,7 @@ class GatewayRequest(BaseModel):
     source_ref: str | None = None
     approval_token: str | None = None
     idempotency_key: str | None = None
+
+
+class EvaluationRunRequest(BaseModel):
+    clean_start: bool = True

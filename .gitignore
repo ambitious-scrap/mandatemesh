@@ -24,3 +24,5 @@ Presentation legacy files/
 
 data/
 
+
+**/*.tsbuildinfo
