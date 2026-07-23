@@ -87,6 +87,7 @@ def create_run(
     *,
     protection_mode: str = "UNPROTECTED",
     mandate_id: str | None = None,
+    evaluation_run_id: str | None = None,
 ) -> dict:
     scenario = get_scenario(scenario_id)
     run = {
@@ -94,6 +95,7 @@ def create_run(
         "scenario_id": scenario_id,
         "protection_mode": protection_mode,
         "mandate_id": mandate_id,
+        "evaluation_run_id": evaluation_run_id,
         "requested_mode": requested_mode,
         "execution_mode": requested_mode,
         "task": task,
@@ -103,8 +105,8 @@ def create_run(
     with connect() as connection:
         connection.execute(
             """INSERT INTO runs
-            (id, scenario_id, protection_mode, mandate_id, requested_mode, execution_mode, task, status, created_at)
-            VALUES (:id, :scenario_id, :protection_mode, :mandate_id, :requested_mode, :execution_mode, :task, :status, :created_at)""",
+            (id, scenario_id, protection_mode, mandate_id, evaluation_run_id, requested_mode, execution_mode, task, status, created_at)
+            VALUES (:id, :scenario_id, :protection_mode, :mandate_id, :evaluation_run_id, :requested_mode, :execution_mode, :task, :status, :created_at)""",
             run,
         )
     record_event(run["id"], "RUN_STARTED", actor="user", mandate_id=mandate_id, source_ref=scenario["invoice"]["invoice_id"],

@@ -12,6 +12,9 @@ _JSON_FIELDS = (
     "canonical_action_json",
     "decision_json",
     "side_effect_json",
+    "policy_input_json",
+    "before_state_json",
+    "after_state_json",
 )
 
 
@@ -28,6 +31,9 @@ def record_event(
     canonical_action: dict | None = None,
     decision: dict | None = None,
     side_effect: dict | None = None,
+    policy_input: dict | None = None,
+    before_state: dict | None = None,
+    after_state: dict | None = None,
     policy_version: str | None = None,
     is_forbidden: bool = False,
     latency_ms: float | None = None,
@@ -46,6 +52,9 @@ def record_event(
         "canonical_action_json": json.dumps(canonical_action) if canonical_action is not None else None,
         "decision_json": json.dumps(decision) if decision is not None else None,
         "side_effect_json": json.dumps(side_effect) if side_effect is not None else None,
+        "policy_input_json": json.dumps(policy_input) if policy_input is not None else None,
+        "before_state_json": json.dumps(before_state) if before_state is not None else None,
+        "after_state_json": json.dumps(after_state) if after_state is not None else None,
         "policy_version": policy_version,
         "is_forbidden": int(is_forbidden),
         "latency_ms": latency_ms,
@@ -55,10 +64,12 @@ def record_event(
             """INSERT INTO tool_events
             (id, run_id, mandate_id, created_at, actor, event_type, source_ref, tool_name,
              tool_arguments_json, tool_result_json, canonical_action_json, decision_json,
-             side_effect_json, policy_version, is_forbidden, latency_ms)
+             side_effect_json, policy_input_json, before_state_json, after_state_json,
+             policy_version, is_forbidden, latency_ms)
             VALUES (:id, :run_id, :mandate_id, :created_at, :actor, :event_type, :source_ref, :tool_name,
                     :tool_arguments_json, :tool_result_json, :canonical_action_json, :decision_json,
-                    :side_effect_json, :policy_version, :is_forbidden, :latency_ms)""",
+                    :side_effect_json, :policy_input_json, :before_state_json, :after_state_json,
+                    :policy_version, :is_forbidden, :latency_ms)""",
             event,
         )
     return get_event(event["id"])

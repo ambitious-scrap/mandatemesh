@@ -8,6 +8,16 @@ from datetime import datetime, timezone
 from .config import DB_PATH
 
 
+class ClosingConnection(sqlite3.Connection):
+    """SQLite connection whose context manager commits/rolls back and closes."""
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        try:
+            return super().__exit__(exc_type, exc_value, traceback)
+        finally:
+            self.close()
+
+
 APPROVED_VENDOR = {
     "id": "VENDOR-101",
     "name": "Aruna Components Pvt Ltd",
@@ -68,7 +78,10 @@ CREATE TABLE IF NOT EXISTS tool_events (
     side_effect_json TEXT,
     policy_version TEXT,
     is_forbidden INTEGER NOT NULL DEFAULT 0,
-    latency_ms REAL
+    latency_ms REAL,
+    policy_input_json TEXT,
+    before_state_json TEXT,
+    after_state_json TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_tool_events_run_created
 ON tool_events(run_id, created_at);
@@ -86,7 +99,8 @@ CREATE TABLE IF NOT EXISTS runs (
     blocked_actions INTEGER NOT NULL DEFAULT 0,
     error TEXT,
     created_at TEXT NOT NULL,
-    completed_at TEXT
+    completed_at TEXT,
+    evaluation_run_id TEXT
 );
 CREATE TABLE IF NOT EXISTS secrets (
     name TEXT PRIMARY KEY,
@@ -135,6 +149,47 @@ CREATE TABLE IF NOT EXISTS approval_tokens (
     amount INTEGER,
     currency TEXT
 );
+
+CREATE TABLE IF NOT EXISTS evaluation_runs (
+    id TEXT PRIMARY KEY,
+    status TEXT NOT NULL,
+    started_at TEXT NOT NULL,
+    completed_at TEXT,
+    total_scenarios INTEGER NOT NULL DEFAULT 0,
+    passed_scenarios INTEGER NOT NULL DEFAULT 0,
+    attack_prevented INTEGER NOT NULL DEFAULT 0,
+    legitimate_succeeded INTEGER NOT NULL DEFAULT 0,
+    false_blocks INTEGER NOT NULL DEFAULT 0,
+    approval_escalations INTEGER NOT NULL DEFAULT 0,
+    median_policy_latency_ms REAL,
+    p95_policy_latency_ms REAL,
+    repeatability_key TEXT,
+    error TEXT
+);
+CREATE TABLE IF NOT EXISTS evaluation_results (
+    id TEXT PRIMARY KEY,
+    evaluation_run_id TEXT NOT NULL,
+    scenario_id TEXT NOT NULL,
+    category TEXT NOT NULL,
+    title TEXT NOT NULL,
+    expected_decision TEXT NOT NULL,
+    actual_decision TEXT NOT NULL,
+    reason_code TEXT,
+    passed INTEGER NOT NULL,
+    baseline_run_id TEXT,
+    protected_run_id TEXT,
+    baseline_outcome TEXT,
+    protected_outcome TEXT,
+    baseline_event_id TEXT,
+    evidence_event_id TEXT,
+    latency_ms REAL,
+    side_effect_detected INTEGER NOT NULL DEFAULT 0,
+    details_json TEXT,
+    created_at TEXT NOT NULL,
+    UNIQUE(evaluation_run_id, scenario_id)
+);
+CREATE INDEX IF NOT EXISTS idx_evaluation_results_run
+ON evaluation_results(evaluation_run_id, scenario_id);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_pending_approval_action
 ON approval_requests(run_id, mandate_id, payment_id, action_hash)
 WHERE status = 'PENDING';
@@ -153,6 +208,10 @@ _MIGRATIONS = (
     ("runs", "protection_mode", "TEXT NOT NULL DEFAULT 'UNPROTECTED'"),
     ("runs", "mandate_id", "TEXT"),
     ("runs", "blocked_actions", "INTEGER NOT NULL DEFAULT 0"),
+    ("runs", "evaluation_run_id", "TEXT"),
+    ("tool_events", "policy_input_json", "TEXT"),
+    ("tool_events", "before_state_json", "TEXT"),
+    ("tool_events", "after_state_json", "TEXT"),
     ("approval_tokens", "run_id", "TEXT"),
     ("approval_tokens", "mandate_id", "TEXT"),
     ("approval_tokens", "payment_id", "TEXT"),
@@ -169,7 +228,7 @@ def utc_now() -> str:
 
 def connect() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    connection = sqlite3.connect(DB_PATH, timeout=10)
+    connection = sqlite3.connect(DB_PATH, timeout=10, factory=ClosingConnection)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA journal_mode=WAL")
     connection.execute("PRAGMA foreign_keys=ON")
@@ -205,30 +264,64 @@ def approved_beneficiary_hash() -> str:
     return APPROVED_VENDOR["bank_account_hash"]
 
 
-def reset_db() -> None:
+def _seed_trusted_state(connection: sqlite3.Connection) -> None:
+    now = utc_now()
+    connection.execute(
+        "INSERT INTO vendors (id, name, bank_account_hash, approved, created_at) VALUES (?, ?, ?, ?, ?)",
+        (*APPROVED_VENDOR.values(), now),
+    )
+    connection.execute(
+        "INSERT INTO secrets (name, value, created_at) VALUES (?, ?, ?)",
+        (SYNTHETIC_SECRET["name"], SYNTHETIC_SECRET["value"], now),
+    )
+
+
+def reset_domain_state() -> None:
+    """Reset mutable business state while preserving evaluation evidence."""
     init_db()
     with connect() as connection:
         for table in (
-            "tool_events",
-            "runs",
             "approval_tokens",
             "approval_requests",
-            "mandates",
             "memory_entries",
             "payments",
             "vendors",
             "secrets",
         ):
             connection.execute(f"DELETE FROM {table}")
-        now = utc_now()
         connection.execute(
-            "INSERT INTO vendors (id, name, bank_account_hash, approved, created_at) VALUES (?, ?, ?, ?, ?)",
-            (*APPROVED_VENDOR.values(), now),
+            """DELETE FROM mandates WHERE id NOT IN (
+            SELECT mandate_id FROM runs
+            WHERE evaluation_run_id IS NOT NULL AND mandate_id IS NOT NULL
+            )"""
         )
+        _seed_trusted_state(connection)
+
+
+def reset_db() -> None:
+    """Reset interactive demo state but retain completed evaluation history."""
+    init_db()
+    with connect() as connection:
         connection.execute(
-            "INSERT INTO secrets (name, value, created_at) VALUES (?, ?, ?)",
-            (SYNTHETIC_SECRET["name"], SYNTHETIC_SECRET["value"], now),
+            "DELETE FROM tool_events WHERE run_id IN (SELECT id FROM runs WHERE evaluation_run_id IS NULL)"
         )
+        connection.execute("DELETE FROM runs WHERE evaluation_run_id IS NULL")
+        for table in (
+            "approval_tokens",
+            "approval_requests",
+            "memory_entries",
+            "payments",
+            "vendors",
+            "secrets",
+        ):
+            connection.execute(f"DELETE FROM {table}")
+        connection.execute(
+            """DELETE FROM mandates WHERE id NOT IN (
+            SELECT mandate_id FROM runs
+            WHERE evaluation_run_id IS NOT NULL AND mandate_id IS NOT NULL
+            )"""
+        )
+        _seed_trusted_state(connection)
 
 
 def rows(query: str, parameters: tuple = ()) -> list[dict]:

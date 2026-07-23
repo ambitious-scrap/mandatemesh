@@ -9,15 +9,16 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from . import approvals, crypto, gateway, mandates, policy
+from . import approvals, crypto, evaluation, gateway, mandates, policy
 from .agent import create_run, execute_run, get_run, resume_after_approval
 from .config import OPA_URL
 from .database import DB_PATH, connect, init_db, reset_db, rows, utc_now
-from .events import list_events, record_event
+from .events import get_event, list_events, record_event
 from .scenarios import get_scenario, list_scenarios
 from .schemas import (
     CompileRequest,
     ConfirmRequest,
+    EvaluationRunRequest,
     GatewayRequest,
     RunRequest,
     RunResponse,
@@ -25,7 +26,7 @@ from .schemas import (
 )
 
 
-app = FastAPI(title="MandateMesh Level 1 API", version="1.0.0")
+app = FastAPI(title="MandateMesh Level 2 API", version="2.0.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
@@ -274,6 +275,40 @@ def approvals_reject(request_id: str) -> dict:
         record_event(request["run_id"], "RUN_REJECTED", actor="user", mandate_id=request["mandate_id"],
                      tool_result={"outcome": "approval_rejected"})
     return {"request": request}
+
+
+# --------------------------------------------------------------------------- #
+# Evidence and fixed evaluation corpus
+# --------------------------------------------------------------------------- #
+@app.get("/api/events/{event_id}")
+def event_detail(event_id: str) -> dict:
+    try:
+        return get_event(event_id)
+    except (IndexError, KeyError):
+        raise HTTPException(status_code=404, detail="Event not found.")
+
+
+@app.get("/api/evaluation")
+def evaluation_list() -> list[dict]:
+    return evaluation.list_evaluations()
+
+
+@app.post("/api/evaluation/run")
+def evaluation_run(request: EvaluationRunRequest) -> dict:
+    if not policy.opa_healthy():
+        raise HTTPException(status_code=503, detail="Protected evaluation requires a reachable OPA policy service.")
+    try:
+        return evaluation.run_evaluation()
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=f"Evaluation failed: {error}") from error
+
+
+@app.get("/api/evaluation/{evaluation_run_id}")
+def evaluation_get(evaluation_run_id: str) -> dict:
+    result = evaluation.get_evaluation(evaluation_run_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Evaluation run not found.")
+    return result
 
 
 # --------------------------------------------------------------------------- #
