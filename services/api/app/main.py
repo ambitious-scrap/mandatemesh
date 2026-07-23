@@ -5,11 +5,11 @@ import json
 import sqlite3
 import threading
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 
-from . import approvals, crypto, evaluation, gateway, mandates, policy
+from . import approvals, crypto, evaluation, gateway, mandates, mcp, memory, policy
 from .agent import create_run, execute_run, get_run, resume_after_approval
 from .config import OPA_URL
 from .database import DB_PATH, connect, init_db, reset_db, rows, utc_now
@@ -26,7 +26,7 @@ from .schemas import (
 )
 
 
-app = FastAPI(title="MandateMesh Level 2 API", version="2.0.0")
+app = FastAPI(title="MandateMesh Level 3 API", version="3.0.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
@@ -71,6 +71,55 @@ def ready() -> JSONResponse:
     return JSONResponse(status_code=200 if opa_reachable else 503, content=payload)
 
 
+# --------------------------------------------------------------------------- #
+# MCP Streamable HTTP adapter (same gateway and policy as REST)
+# --------------------------------------------------------------------------- #
+@app.post("/mcp")
+async def mcp_post(request: Request) -> Response:
+    origin = request.headers.get("origin")
+    if not mcp.origin_allowed(origin):
+        return JSONResponse(
+            status_code=403,
+            content={"jsonrpc": "2.0", "id": None, "error": {"code": -32000, "message": "Forbidden Origin"}},
+        )
+    try:
+        message = await request.json()
+    except (json.JSONDecodeError, ValueError):
+        return JSONResponse(
+            status_code=400,
+            content={"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "Parse error"}},
+        )
+
+    protocol = request.headers.get("mcp-protocol-version")
+    if message.get("method") != "initialize" and protocol != mcp.PROTOCOL_VERSION:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "jsonrpc": "2.0",
+                "id": message.get("id"),
+                "error": {"code": -32602, "message": "Unsupported MCP-Protocol-Version"},
+            },
+        )
+    response = mcp.handle(message)
+    if response is None:
+        return Response(status_code=202)
+    return JSONResponse(content=response, media_type="application/json")
+
+
+@app.get("/mcp")
+def mcp_get(request: Request) -> Response:
+    if not mcp.origin_allowed(request.headers.get("origin")):
+        return JSONResponse(
+            status_code=403,
+            content={"jsonrpc": "2.0", "id": None, "error": {"code": -32000, "message": "Forbidden Origin"}},
+        )
+    return JSONResponse(
+        status_code=405,
+        content={"jsonrpc": "2.0", "id": None, "error": {"code": -32000, "message": "Server-initiated SSE is not enabled"}},
+        headers={"Allow": "POST"},
+    )
+
+
 @app.get("/api/scenarios")
 def scenarios() -> list[dict]:
     return list_scenarios()
@@ -98,6 +147,14 @@ def mandate_get(mandate_id: str) -> dict:
     if mandate is None:
         raise HTTPException(status_code=404, detail="Mandate not found.")
     return mandate
+
+
+@app.get("/api/mandates/{mandate_id}/compiler-report")
+def mandate_compiler_report(mandate_id: str) -> dict:
+    mandate = mandates.get_mandate(mandate_id)
+    if mandate is None:
+        raise HTTPException(status_code=404, detail="Mandate not found.")
+    return mandate["compiler_report"]
 
 
 @app.post("/api/mandates/{mandate_id}/confirm")
@@ -312,6 +369,70 @@ def evaluation_get(evaluation_run_id: str) -> dict:
 
 
 # --------------------------------------------------------------------------- #
+# Memory trust state
+# --------------------------------------------------------------------------- #
+@app.get("/api/memory/trusted")
+def memory_trusted() -> list[dict]:
+    return memory.trusted_entries()
+
+
+@app.get("/api/memory/quarantine")
+def memory_quarantine() -> list[dict]:
+    return memory.quarantined_entries()
+
+
+@app.post("/api/level3/demo-session")
+def level3_demo_session(request: CompileRequest) -> dict:
+    """Create an idle protected run for an interactive MCP proof.
+
+    The endpoint is a demo harness only. It creates and signs authority through
+    the same trusted lifecycle, but it never exposes signing as an agent tool and
+    does not execute a workflow in the background.
+    """
+    task = request.task
+    mandate = mandates.compile_mandate(task)
+    mandates.confirm_mandate(mandate["id"])
+    signed = mandates.sign_mandate(mandate["id"])
+    run = create_run(
+        "normal-invoice",
+        "deterministic",
+        task,
+        protection_mode="PROTECTED",
+        mandate_id=signed["id"],
+    )
+    record_event(
+        run["id"],
+        "LEVEL3_DEMO_SESSION_CREATED",
+        actor="user",
+        mandate_id=signed["id"],
+        tool_result={"transports": ["REST", "MCP"], "differentiators": ["MCP", "MEMORY_QUARANTINE", "SEMANTIC_COMPILER"]},
+    )
+    return {
+        "run_id": run["id"],
+        "mandate_id": signed["id"],
+        "mandate_status": signed["status"],
+        "protocol_version": mcp.PROTOCOL_VERSION,
+        "compiler_report": signed["compiler_report"],
+    }
+
+
+@app.get("/api/level3/status")
+def level3_status() -> dict:
+    return {
+        "level": 3,
+        "features": {
+            "mcp_adapter": {"enabled": True, "protocol_version": mcp.PROTOCOL_VERSION, "tools": len(mcp.tool_definitions())},
+            "memory_quarantine": {
+                "enabled": True,
+                "quarantined": len(memory.quarantined_entries()),
+                "trusted_retrievable": len(memory.trusted_entries()),
+            },
+            "semantic_compiler": {"enabled": True, "version": mandates.COMPILER_VERSION},
+        },
+    }
+
+
+# --------------------------------------------------------------------------- #
 # Persisted state
 # --------------------------------------------------------------------------- #
 @app.get("/api/state")
@@ -344,6 +465,8 @@ def state() -> dict:
         "vendors": vendors,
         "payments": rows("SELECT * FROM payments ORDER BY created_at"),
         "memory_entries": rows("SELECT * FROM memory_entries ORDER BY created_at"),
+        "trusted_memory": memory.trusted_entries(),
+        "quarantined_memory": memory.quarantined_entries(),
         "secret_accesses": secret_accesses,
         "mandates": mandate_rows,
         "approval_requests": approvals.list_pending(),

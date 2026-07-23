@@ -73,6 +73,7 @@ def build_canonical_action(
     mandate_id: str | None,
     task_state: dict,
     idempotency_key: str | None,
+    transport: str = "REST",
 ) -> dict | None:
     """Return the canonical action document, or ``None`` for an unknown tool."""
     canonical_action = canonical_for(tool_name)
@@ -84,7 +85,11 @@ def build_canonical_action(
         "tool_name": tool_name,
         "arguments": arguments,
         "resource": _resource(canonical_action, arguments),
-        "provenance": {"source_ref": source_ref, "source_trust": UNTRUSTED_SOURCE},
+        "provenance": {
+            "source_ref": source_ref,
+            "source_trust": UNTRUSTED_SOURCE,
+            "transport": transport,
+        },
         "task_state": task_state,
         "mandate_id": mandate_id,
         "timestamp": utc_now(),
