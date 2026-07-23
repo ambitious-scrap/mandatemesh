@@ -27,15 +27,39 @@ services:
       MODEL_API_KEY: ${MODEL_API_KEY:-}
       MODEL_BASE_URL: ${MODEL_BASE_URL:-https://api.openai.com/v1}
       MODEL_NAME: ${MODEL_NAME:-gpt-4.1-mini}
+      OPA_URL: ${OPA_URL:-http://opa:8181}
     ports:
       - "8000:8000"
+    depends_on:
+      opa:
+        condition: service_started
     volumes:
       - mandatemesh-data:/app/data
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"]
+      # Healthy only once the API is up AND its policy engine is reachable, so
+      # the web tier waits for the whole enforcement chain before starting.
+      test:
+        - "CMD"
+        - "python"
+        - "-c"
+        - "import json,urllib.request; exit(0 if json.load(urllib.request.urlopen('http://127.0.0.1:8000/health'))['opa']['reachable'] else 1)"
       interval: 5s
       timeout: 3s
-      retries: 10
+      retries: 15
+
+  opa:
+    image: openpolicyagent/opa:1.4.2
+    restart: unless-stopped
+    # Policy decision point. Internal network only — no host port is published,
+    # so only the trusted API/gateway can reach it. The agent never gets here.
+    command:
+      - "run"
+      - "--server"
+      - "--addr=0.0.0.0:8181"
+      - "--log-level=error"
+      - "/policy/mandate.rego"
+    volumes:
+      - ./policy:/policy:ro
 
 volumes:
   mandatemesh-data:
