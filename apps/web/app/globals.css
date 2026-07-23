@@ -348,3 +348,66 @@ footer { min-height: 68px; border-top: 2px solid var(--line); display: flex; ali
   .evidence-meta { border-left: 0; border-top: 2px solid var(--line); }
   .drawer-head { flex-direction: column; }
 }
+
+/* ---------------------------------------------------------------------------
+   Level 3 — MCP, memory quarantine, semantic compiler
+   --------------------------------------------------------------------------- */
+.level3-intro { grid-template-columns: minmax(0, 1.4fr) 340px; }
+.level3-launch { align-self: stretch; display: grid; align-content: center; gap: 12px; padding: 24px; border: 3px solid var(--line); background: var(--surface); box-shadow: 8px 8px 0 var(--ink); }
+.level3-launch small { font: 800 0.62rem var(--mono); color: var(--muted); }
+.level3-launch strong { font: 900 clamp(3rem, 7vw, 5.4rem) var(--mono); letter-spacing: -0.08em; line-height: 0.9; }
+.level3-launch span { width: fit-content; padding: 6px 9px; border: 2px solid var(--safe); background: var(--safe-bg); color: var(--safe); font: 800 0.62rem var(--mono); }
+.level3-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 18px; align-items: start; }
+.differentiator-card { min-width: 0; border: 3px solid var(--line); background: var(--surface); }
+.differentiator-card > header { display: flex; gap: 14px; padding: 18px; border-bottom: 3px solid var(--line); background: var(--paper); }
+.differentiator-card > header > span { display: grid; place-items: center; width: 38px; height: 38px; flex: 0 0 auto; border: 2px solid var(--line); font: 900 0.72rem var(--mono); }
+.differentiator-card h2 { margin: 0 0 4px; font-size: 1rem; }
+.differentiator-card header p { margin: 0; color: var(--muted); font-size: 0.7rem; }
+.differentiator-card textarea { width: calc(100% - 36px); margin: 0 18px 16px; resize: vertical; border: 2px solid var(--line); background: var(--paper); padding: 12px; font: 0.72rem/1.5 var(--mono); }
+.differentiator-card details { margin: 14px 18px; border: 1px solid var(--line); }
+.differentiator-card details summary { padding: 9px; cursor: pointer; font: 800 0.6rem var(--mono); text-transform: uppercase; }
+.differentiator-card details pre { max-height: 220px; overflow: auto; margin: 0; padding: 10px; background: var(--paper); font-size: 0.6rem; white-space: pre-wrap; overflow-wrap: anywhere; }
+.field-label { display: block; margin: 16px 18px 7px; color: var(--muted); font: 800 0.58rem var(--mono); text-transform: uppercase; }
+.proof-strip { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 14px 18px; padding: 10px; border: 2px solid var(--line); background: var(--safe-bg); }
+.proof-strip b { font: 900 0.72rem var(--mono); }
+.proof-strip span { font-size: 0.65rem; }
+.proof-strip code { margin-left: auto; font-size: 0.58rem; overflow-wrap: anywhere; }
+.contract-mini-grid, .quarantine-metrics { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); margin: 0 18px 14px; border: 2px solid var(--line); }
+.contract-mini-grid > div, .quarantine-metrics > div { padding: 10px; border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.contract-mini-grid > div:nth-child(2n), .quarantine-metrics > div:nth-child(2n) { border-right: 0; }
+.contract-mini-grid > div:nth-last-child(-n+2), .quarantine-metrics > div:last-child { border-bottom: 0; }
+.contract-mini-grid small, .quarantine-metrics small { display: block; color: var(--muted); font: 700 0.54rem var(--mono); text-transform: uppercase; }
+.contract-mini-grid b, .quarantine-metrics b { display: block; margin-top: 5px; font: 900 0.78rem var(--mono); overflow-wrap: anywhere; }
+.quarantine-metrics { grid-template-columns: repeat(3, 1fr); margin-top: 18px; }
+.quarantine-metrics > div:nth-child(2) { border-right: 1px solid var(--line); }
+.confidence-grid { display: grid; grid-template-columns: repeat(2, 1fr); margin: 0 18px 14px; gap: 6px; }
+.confidence-grid > div { display: flex; justify-content: space-between; gap: 8px; padding: 7px; background: var(--paper); border: 1px solid var(--line); font: 0.58rem var(--mono); }
+.review-box { margin: 0 18px 18px; padding: 12px; border: 2px solid var(--amber); background: var(--amber-bg); }
+.review-box strong { font: 900 0.65rem var(--mono); text-transform: uppercase; }
+.review-box p { margin: 7px 0 0; font-size: 0.66rem; }
+.mcp-flow { display: grid; margin: 0 18px 16px; border: 2px solid var(--line); }
+.mcp-flow > div { display: grid; grid-template-columns: 90px minmax(0, 1fr) auto; align-items: center; gap: 8px; padding: 11px; border-bottom: 1px solid var(--line); }
+.mcp-flow > div:last-child { border-bottom: 0; }
+.mcp-flow small { font: 800 0.54rem var(--mono); color: var(--muted); }
+.mcp-flow b { font: 800 0.67rem var(--mono); overflow-wrap: anywhere; }
+.mcp-flow span { font: 800 0.56rem var(--mono); overflow-wrap: anywhere; }
+.proof-allow { color: var(--safe); }
+.proof-block { color: var(--danger); }
+.proof-pending { color: var(--muted); }
+.quarantine-record { margin: 0 18px 18px; padding: 14px; border: 2px solid var(--danger); background: var(--danger-bg); }
+.quarantine-record > span { display: flex; justify-content: space-between; gap: 10px; }
+.quarantine-record b, .quarantine-record em, .quarantine-record code { font: 800 0.62rem var(--mono); }
+.quarantine-record p { font-size: 0.72rem; }
+.quarantine-record small { display: block; margin-top: 10px; color: var(--safe); font: 800 0.56rem var(--mono); text-transform: uppercase; }
+.shared-plane { display: flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: 12px; margin: 18px 0; padding: 18px; border: 3px solid var(--line); background: var(--ink); color: var(--surface); font: 800 0.65rem var(--mono); }
+.shared-plane i { color: var(--amber); font-style: normal; }
+
+@media (max-width: 1120px) {
+  .level3-grid { grid-template-columns: 1fr; }
+}
+@media (max-width: 760px) {
+  .level3-intro { grid-template-columns: 1fr; }
+  .quarantine-metrics { grid-template-columns: 1fr; }
+  .quarantine-metrics > div { border-right: 0; border-bottom: 1px solid var(--line); }
+  .mcp-flow > div { grid-template-columns: 1fr; }
+}
