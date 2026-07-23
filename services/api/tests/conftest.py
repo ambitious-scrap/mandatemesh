@@ -18,10 +18,12 @@ _OPA_CONTAINER = "mm-opa-pytest"
 
 @pytest.fixture(autouse=True)
 def isolated_database(tmp_path, monkeypatch):
-    from app import database
+    from app import config, database
     from app import main
 
     test_db = tmp_path / "mandatemesh-test.sqlite3"
+    test_key = tmp_path / "demo-principal-ed25519.key"
+    monkeypatch.setattr(config, "KEY_PATH", test_key)
     monkeypatch.setattr(database, "DB_PATH", test_db)
     monkeypatch.setattr(main, "DB_PATH", test_db)
     database.reset_db()
