@@ -105,11 +105,33 @@ The hackathon MVP proves this thesis through one accounts-payable workflow.
 ### Secondary goals
 
 - Support the same policy engine for REST-style tools and one MCP adapter.
-- Quarantine prohibited memory writes.
+- Quarantine prohibited memory writes and exclude them from trusted retrieval.
+- Improve the domain-bounded semantic compiler with confidence, ambiguity warnings, and review requirements.
 - Show mandate tampering and replay protection.
 - Provide a polished five-minute attack-versus-defense demo.
 
 ---
+
+
+### Level 3 implementation scope
+
+After the Level 2 milestone was frozen, the owner explicitly approved all three
+post-core differentiators as one bounded layer:
+
+1. **MCP adapter:** stable `2025-11-25` JSON-RPC tool discovery and invocation,
+   with every call routed through the existing MandateMesh gateway. The adapter
+   contains no independent authorization policy.
+2. **Memory quarantine:** prohibited financial-memory writes remain `BLOCK`ed,
+   but their source, trust label, mandate/run binding, and reason are retained as
+   `QUARANTINED` evidence. Trusted retrieval returns only active trusted or
+   human-confirmed entries.
+3. **Semantic compiler improvements:** natural-language requests are converted
+   into domain-bounded typed proposals with extracted constraints, confidence,
+   ambiguity warnings, and explicit review requirements. Compiler output is
+   non-authoritative and cannot confirm, sign, or activate a mandate.
+
+This scope does not alter the non-goal of universal natural-language policy
+compilation and does not begin browser-agent, SaaS connector, or Level 4 work.
 
 ## 5. Non-Goals
 

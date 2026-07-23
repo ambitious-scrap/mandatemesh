@@ -19,7 +19,7 @@ Do not proceed because a clock milestone arrived. Proceed only when the gate for
 | Level 0 | Reproducible unprotected attack | H04 |
 | Level 1 | Complete enforcement loop | H16 |
 | Level 2 | Judge-proof security depth | H22 |
-| Level 3 | One advanced differentiator | H26 |
+| Level 3 | Three bounded differentiators (owner-approved scope override) | H26 |
 | Level 4 | Reliability, deployment, rehearsal | H30 |
 
 ### Priority order
@@ -547,15 +547,19 @@ If no:
 
 If yes:
 
-- Choose one Level 3 differentiator.
+- Begin the approved Level 3 differentiator scope.
 
 ---
 
-# LEVEL 3: One Advanced Differentiator
+# LEVEL 3: Three Bounded Differentiators
 
 ## H22 to H26
 
-Choose exactly one.
+**Owner scope override:** after Level 2 was frozen and verified, the owner
+explicitly authorized implementing all three differentiators together. This
+supersedes the earlier "choose exactly one" sequencing constraint. Each feature
+must remain narrow, share the existing gateway and policy plane, preserve the
+Level 2 fingerprint, and stop before Level 4.
 
 ## Option A: MCP adapter
 
@@ -617,13 +621,17 @@ Choose exactly one.
 
 ## Level 3 gate at H26
 
-- [ ] Exactly one differentiator completed.
-- [ ] Core evaluation still passes.
-- [ ] Demo remains under five minutes.
-- [ ] New feature adds a clear proof point.
-- [ ] No new critical dependency introduced.
+- [ ] MCP adapter exposes the simulated tools and routes every call through the existing gateway.
+- [ ] One protected MCP action succeeds and one malicious MCP action blocks without a side effect.
+- [ ] Prohibited financial-memory writes are stored as `QUARANTINED` evidence.
+- [ ] Quarantined content is visible for review but excluded from trusted retrieval.
+- [ ] Semantic compiler emits typed fields, confidence, warnings, and review requirements.
+- [ ] Compiler output remains non-authoritative until human confirmation and backend signing.
+- [ ] Core ten-scenario evaluation still passes with the same repeatability fingerprint.
+- [ ] Demo remains under five minutes by presenting the three proofs as one shared authorization plane.
+- [ ] No duplicated policy implementation or new critical external dependency is introduced.
 
-If the gate fails, remove the differentiator and return to the Level 2 build.
+If the gate fails, remove or narrow the failing differentiator and return to the Level 2 build.
 
 ---
 

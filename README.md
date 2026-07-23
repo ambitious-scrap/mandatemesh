@@ -15,6 +15,11 @@ accounts-payable agent, driven by the same invoices, can be run two ways:
   legitimate actions against both boundaries, persists expected-versus-actual
   results, measures median/P95 policy latency, and exposes execution provenance
   with policy input, before/after state, and source evidence.
+- **Level 3 — Three bounded differentiators.** A stable MCP adapter routes tool
+  calls through the same gateway, denied financial-memory writes are retained as
+  quarantined evidence but excluded from trusted retrieval, and a conservative
+  semantic compiler explains extracted constraints, confidence, ambiguity, and
+  mandatory human review before signing.
 
 Two invoices drive the same agent:
 
@@ -23,10 +28,11 @@ Two invoices drive the same agent:
   that tries to create a rogue vendor, read a secret, poison persistent memory,
   and pay an attacker beneficiary.
 
-The web UI has **Unprotected**, **Protected**, and **Evaluation** screens. Level 0
-shows the attack landing in SQLite; Level 1 shows the gateway refusing each
-forbidden action and executing only the approved payment; Level 2 runs and
-explains the complete fixed corpus without developer tools.
+The web UI has **Unprotected**, **Protected**, **Evaluation**, and **Level 3**
+screens. Level 0 shows the attack landing in SQLite; Level 1 shows the gateway
+refusing each forbidden action and executing only the approved payment; Level 2
+runs and explains the complete fixed corpus; Level 3 proves MCP transport parity,
+memory quarantine, and explainable mandate compilation without developer tools.
 
 > This README covers **setup and usage only**. For the product rationale, threat
 > model, and level roadmap see [`PRODUCT_SPEC.md`](./PRODUCT_SPEC.md) and
@@ -41,10 +47,10 @@ explains the complete fixed corpus without developer tools.
 ├── apps/web/                # Next.js 16 frontend (protected + unprotected UI)
 ├── services/api/            # FastAPI backend
 │   ├── app/                 # agent, gateway, evidence, evaluation, policy, routes
-│   └── tests/               # pytest suite (Levels 0–2)
+│   └── tests/               # pytest suite (Levels 0–3)
 ├── policy/                  # OPA/Rego policy (mandate.rego) and Rego tests
 ├── scenarios/invoices/      # normal.json and malicious.json source invoices
-├── scripts/                 # seed/reset and Level 0/1/2 smoke helpers
+├── scripts/                 # seed/reset and Level 0/1/2/3 smoke helpers
 ├── docker-compose.yml       # web + api + opa, health checks, persistent volume
 ├── .env.example             # copy to .env; safe placeholders only
 ├── PRODUCT_SPEC.md          # what/why (authoritative spec)
@@ -198,7 +204,7 @@ evaluation reports and their evidence remain available for judge review. Any of 
 
 Covers the tools, agent plan, canonical serialization, mandate lifecycle and
 crypto, the protected gateway, concurrency hardening, the fixed ten-scenario
-corpus, evidence persistence, and all three end-to-end levels. Gateway tests need OPA
+corpus, evidence persistence, and all four end-to-end levels. Gateway tests need OPA
 reachable at `OPA_URL`; if OPA is unavailable those tests skip automatically.
 
 ```bash
@@ -246,6 +252,7 @@ Inside Docker (OPA is already running in the stack):
 docker compose exec api python /app/scripts/smoke_test.py --repetitions 3
 docker compose exec api python /app/scripts/smoke_level1.py --repetitions 3
 docker compose exec api python /app/scripts/smoke_level2.py --repetitions 3
+docker compose exec api python /app/scripts/smoke_level3.py --repetitions 3
 ```
 
 ### Level 2 — fixed corpus and repeatability
@@ -259,6 +266,18 @@ python scripts/smoke_level2.py --repetitions 3
 ```
 
 Each passing run prints one result dict per repetition followed by a `PASS:` line.
+
+### Level 3 — MCP, quarantine, and semantic compilation
+
+`smoke_level3.py` creates a signed protected session, verifies MCP protocol and
+seven-tool discovery, executes an allowed MCP read through the real gateway,
+blocks an MCP memory-poisoning attempt, confirms the denied content is visible in
+quarantine but absent from trusted retrieval, and validates the semantic
+compiler's limits, duration, confidence, and non-authoritative review report.
+
+```bash
+python scripts/smoke_level3.py --repetitions 3
+```
 
 ---
 
@@ -298,8 +317,10 @@ masthead to choose a boundary.
    resumes and executes the payment **exactly once**.
 4. **Read the evidence.** The enforcement summary shows actions blocked, payments
    executed (1), and forbidden side effects (0). Under **Persisted state** no
-   rogue vendor, poisoned memory, or secret access appears — only the single
-   approved `EXECUTED` payment to `VENDOR-101`.
+   rogue vendor, trusted poisoned memory, or secret access appears. The denied
+   memory instruction is retained separately as `QUARANTINED` evidence and is
+   never returned by trusted-memory retrieval; only the single approved
+   `EXECUTED` payment to `VENDOR-101` lands.
 
 Click **Reset demo state** to return to a clean baseline.
 
@@ -316,6 +337,25 @@ Click **Reset demo state** to return to a clean baseline.
    after resource state. This evidence trail is labelled **execution provenance**.
 5. Re-run the corpus. Recorded evaluations remain selectable and the repeatability
    key should remain identical when decisions are identical.
+
+
+### Level 3 — all three differentiators
+
+1. Select **Level 3** in the masthead and click **RUN ALL THREE PROOFS**.
+2. Review the semantic compiler report: typed limits, extracted constraints,
+   field confidence, ambiguity warnings, and the explicit `authoritative: false`
+   marker. The draft cannot activate itself; confirmation and backend signing
+   remain separate human-controlled steps.
+3. Inspect MCP discovery and execution. The adapter uses stable protocol
+   `2025-11-25`, exposes all seven simulated tools, and sends both the allowed
+   invoice read and blocked attack through the same canonicalization, signature,
+   OPA, approval, idempotency, and evidence path used by REST.
+4. Inspect the memory result. The poisoned financial instruction remains visible
+   as a source-bound `QUARANTINED` record, while the trusted-memory result remains
+   empty. The original gateway outcome stays `BLOCK` with
+   `MEMORY_WRITE_FORBIDDEN`.
+5. Follow the shared-pipeline view to verify that none of the three features
+   duplicates or bypasses the authorization plane.
 
 ### Deterministic vs live model
 
@@ -335,7 +375,9 @@ Base URL: `http://localhost:8000`
 | `GET`  | `/health` | Liveness/degraded status; unprotected mode remains inspectable without OPA. |
 | `GET`  | `/ready` | Protected-stack readiness; returns HTTP 503 when OPA is unavailable. |
 | `GET`  | `/api/scenarios` | List available invoice scenarios. |
-| `POST` | `/api/mandates/compile` | Compile a human task into a draft mandate contract. |
+| `POST` | `/api/mandates/compile` | Compile a human task into a non-authoritative draft plus confidence/warnings. |
+| `GET` | `/api/mandates/{id}/compiler-report` | Fetch the persisted semantic compiler report. |
+| `POST` | `/mcp` | Stable MCP `2025-11-25` JSON-RPC adapter; all tool calls traverse the gateway. |
 | `GET`  | `/api/mandates` · `/api/mandates/{id}` | List / fetch mandates. |
 | `POST` | `/api/mandates/{id}/confirm` | Human-confirm and freeze the contract (with optional edits). |
 | `POST` | `/api/mandates/{id}/sign` | Backend Ed25519-signs the mandate → `ACTIVE`. |
@@ -349,7 +391,9 @@ Base URL: `http://localhost:8000`
 | `GET` | `/api/evaluation` · `/api/evaluation/{id}` | List and inspect persisted evaluation reports. |
 | `GET`  | `/api/approvals/pending` | Pending human approvals. |
 | `POST` | `/api/approvals/{id}/approve` · `/reject` | Decide an approval; approve resumes the paused run. |
-| `GET`  | `/api/state` | Full demo state snapshot. |
+| `GET`  | `/api/state` | Full demo state snapshot, including trusted and quarantined memory. |
+| `GET` | `/api/memory/trusted` · `/api/memory/quarantine` | Trusted retrieval and quarantined evidence views. |
+| `POST` | `/api/level3/demo-session` · `GET /api/level3/status` | Create and inspect the combined Level 3 proof session. |
 | `GET`  | `/api/vendors` · `/api/payments` · `/api/memory-entries` | Persisted state views. |
 | `POST` | `/api/reset` | Reset and re-seed demo state. |
 
