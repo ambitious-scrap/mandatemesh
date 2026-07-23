@@ -126,11 +126,23 @@ CREATE TABLE IF NOT EXISTS approval_tokens (
     nonce TEXT NOT NULL UNIQUE,
     expires_at TEXT NOT NULL,
     created_at TEXT NOT NULL,
-    consumed_at TEXT
+    consumed_at TEXT,
+    run_id TEXT,
+    mandate_id TEXT,
+    payment_id TEXT,
+    vendor_id TEXT,
+    beneficiary_hash TEXT,
+    amount INTEGER,
+    currency TEXT
 );
+CREATE UNIQUE INDEX IF NOT EXISTS uq_pending_approval_action
+ON approval_requests(run_id, mandate_id, payment_id, action_hash)
+WHERE status = 'PENDING';
+CREATE UNIQUE INDEX IF NOT EXISTS uq_approval_token_request
+ON approval_tokens(approval_request_id);
 """
 
-# Additive column migrations for databases created before Level 1. Each entry is
+# Additive migrations for databases created before hardening. Each entry is
 # (table, column, definition); applied only when the column is absent.
 _MIGRATIONS = (
     ("payments", "mandate_id", "TEXT"),
@@ -141,6 +153,13 @@ _MIGRATIONS = (
     ("runs", "protection_mode", "TEXT NOT NULL DEFAULT 'UNPROTECTED'"),
     ("runs", "mandate_id", "TEXT"),
     ("runs", "blocked_actions", "INTEGER NOT NULL DEFAULT 0"),
+    ("approval_tokens", "run_id", "TEXT"),
+    ("approval_tokens", "mandate_id", "TEXT"),
+    ("approval_tokens", "payment_id", "TEXT"),
+    ("approval_tokens", "vendor_id", "TEXT"),
+    ("approval_tokens", "beneficiary_hash", "TEXT"),
+    ("approval_tokens", "amount", "INTEGER"),
+    ("approval_tokens", "currency", "TEXT"),
 )
 
 
@@ -154,6 +173,7 @@ def connect() -> sqlite3.Connection:
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA journal_mode=WAL")
     connection.execute("PRAGMA foreign_keys=ON")
+    connection.execute("PRAGMA busy_timeout=10000")
     return connection
 
 
@@ -162,6 +182,16 @@ def _migrate(connection: sqlite3.Connection) -> None:
         existing = {row["name"] for row in connection.execute(f"PRAGMA table_info({table})")}
         if column not in existing:
             connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+    # Index creation is repeated after migrations so an old approval_tokens table
+    # receives the new constraints safely.
+    connection.execute(
+        """CREATE UNIQUE INDEX IF NOT EXISTS uq_pending_approval_action
+        ON approval_requests(run_id, mandate_id, payment_id, action_hash)
+        WHERE status = 'PENDING'"""
+    )
+    connection.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_approval_token_request ON approval_tokens(approval_request_id)"
+    )
 
 
 def init_db() -> None:
@@ -215,4 +245,3 @@ def decode_json_fields(items: list[dict], fields: tuple[str, ...]) -> list[dict]
                 item[field.removesuffix("_json")] = None
                 item.pop(field, None)
     return items
-

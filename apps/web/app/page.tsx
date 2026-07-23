@@ -24,7 +24,7 @@ type Run = {
   mandate_id?: string | null;
   requested_mode: string;
   execution_mode: string;
-  status: "RUNNING" | "AWAITING_APPROVAL" | "COMPLETED" | "FAILED";
+  status: "RUNNING" | "AWAITING_APPROVAL" | "COMPLETED" | "FAILED" | "BLOCKED" | "REJECTED";
   forbidden_proposals: number;
   forbidden_side_effects: number;
   blocked_actions?: number;
@@ -458,7 +458,7 @@ function ProtectedView() {
         // Release the busy lock once the run leaves RUNNING so the approval
         // controls become interactive while the run is paused for a decision.
         if (nextRun.status !== "RUNNING") setBusy(false);
-        if (nextRun.status === "COMPLETED" || nextRun.status === "FAILED") {
+        if (["COMPLETED", "FAILED", "BLOCKED", "REJECTED"].includes(nextRun.status)) {
           window.clearInterval(timer);
         }
       } catch (cause) {
@@ -584,6 +584,7 @@ function ProtectedView() {
   const executed = state.payments.filter((payment) => payment.status === "EXECUTED");
   const runFinished = run?.status === "COMPLETED";
   const runActive = run?.status === "RUNNING" || run?.status === "AWAITING_APPROVAL";
+  const runStopped = run?.status === "FAILED" || run?.status === "BLOCKED" || run?.status === "REJECTED";
 
   return (
     <>
@@ -596,6 +597,12 @@ function ProtectedView() {
       </section>
 
       {error && <div className="error-banner" role="alert"><strong>System error</strong><span>{error}</span></div>}
+      {runStopped && (
+        <div className="error-banner" role="status">
+          <strong>Protected run {run?.status.toLowerCase()}</strong>
+          <span>{run?.error ?? "The gateway refused to mark this run successful."}</span>
+        </div>
+      )}
 
       {/* 01 — Mandate lifecycle */}
       <div className="mandate-grid">

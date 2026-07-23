@@ -15,6 +15,7 @@ if sys.version_info[:2] != (3, 14):
 ROOT = Path(__file__).resolve().parents[3]
 DATA_DIR = Path(os.getenv("MANDATEMESH_DATA_DIR", ROOT / "data"))
 DB_PATH = Path(os.getenv("MANDATEMESH_DB_PATH", DATA_DIR / "mandatemesh.sqlite3"))
+KEY_PATH = Path(os.getenv("MANDATEMESH_KEY_PATH") or (DATA_DIR / "demo-principal-ed25519.key"))
 SCENARIO_DIR = ROOT / "scenarios" / "invoices"
 
 MODEL_API_KEY = os.getenv("MODEL_API_KEY", "")

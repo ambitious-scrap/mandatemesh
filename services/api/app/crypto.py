@@ -1,18 +1,16 @@
-"""Ed25519 signing for the local demo principal.
+"""Ed25519 signing for the persistent local demo principal.
 
-The demo principal keypair is derived deterministically from a fixed labelled
-seed so the same public key is stable across restarts and resets without storing
-a raw private key in the repository. This is a **local demo principal only** — it
-is not production PKI, a KMS, a passkey, or hardware-backed storage.
-
-The private key lives only inside this module. It is never returned by an API
-endpoint, never placed in a prompt, and never exposed as an agent tool. Only the
-explicit human "sign mandate" and "approve" backend operations call into it.
+A random private key is generated on first use and stored outside source control
+under MandateMesh's data directory. The file is reused across service restarts,
+never exposed through the agent/tool surface, and never returned by an API.
+This remains a local demo principal, not production PKI or a hardware-backed key.
 """
 from __future__ import annotations
 
 import base64
-import hashlib
+import os
+import time
+from pathlib import Path
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import (
@@ -20,14 +18,10 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PublicKey,
 )
 
-# Deterministic, clearly-synthetic demo seed. Not a credential to any real
-# system; derived through SHA-256 so no raw key material is committed.
-_DEMO_SEED = hashlib.sha256(b"mandatemesh-local-demo-principal-v1").digest()
+from . import config
 
 PRINCIPAL_ID = "demo-principal-local"
-
-_private_key = Ed25519PrivateKey.from_private_bytes(_DEMO_SEED)
-_public_key = _private_key.public_key()
+_KEY_BYTES = 32
 
 
 def _b64(raw: bytes) -> str:
@@ -35,31 +29,74 @@ def _b64(raw: bytes) -> str:
 
 
 def _unb64(text: str) -> bytes:
-    return base64.b64decode(text.encode("ascii"))
+    return base64.b64decode(text.encode("ascii"), validate=True)
+
+
+def _read_key(path: Path) -> Ed25519PrivateKey:
+    # A concurrently-created file may be visible a few microseconds before its
+    # writer closes it. Retry briefly rather than accepting partial key material.
+    for attempt in range(5):
+        raw = path.read_bytes()
+        if len(raw) == _KEY_BYTES:
+            return Ed25519PrivateKey.from_private_bytes(raw)
+        if attempt < 4:
+            time.sleep(0.01)
+    raise RuntimeError(f"Invalid Ed25519 key file at {path}: expected {_KEY_BYTES} bytes.")
+
+
+def _load_or_create_private_key() -> Ed25519PrivateKey:
+    path = Path(config.KEY_PATH)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        return _read_key(path)
+
+    private = Ed25519PrivateKey.generate()
+    raw = private.private_bytes_raw()
+    try:
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        return _read_key(path)
+
+    try:
+        written = 0
+        while written < len(raw):
+            written += os.write(descriptor, raw[written:])
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        # Some mounted filesystems do not support POSIX modes. The data-volume
+        # location still keeps the key outside the repository and agent surface.
+        pass
+    return private
+
+
+def ensure_key() -> Path:
+    """Create/load the demo key and return only its filesystem path."""
+    _load_or_create_private_key()
+    return Path(config.KEY_PATH)
 
 
 def public_key_b64() -> str:
     """Base64 raw public key stored alongside signed material."""
-    return _b64(_public_key.public_bytes_raw())
+    return _b64(_load_or_create_private_key().public_key().public_bytes_raw())
 
 
 def sign(message: bytes) -> str:
-    """Sign raw bytes with the demo principal private key (base64 signature)."""
-    return _b64(_private_key.sign(message))
+    """Sign raw bytes with the persistent demo principal private key."""
+    return _b64(_load_or_create_private_key().sign(message))
 
 
 def verify(message: bytes, signature_b64: str, public_key_b64_value: str | None = None) -> bool:
-    """Verify a base64 signature over ``message`` against a public key.
-
-    Defaults to the demo principal public key. Returns ``False`` for any
-    malformed input or verification failure — never raises.
-    """
+    """Verify a base64 signature, returning ``False`` for malformed input."""
     try:
         if public_key_b64_value:
             public = Ed25519PublicKey.from_public_bytes(_unb64(public_key_b64_value))
         else:
-            public = _public_key
+            public = _load_or_create_private_key().public_key()
         public.verify(_unb64(signature_b64), message)
         return True
-    except (InvalidSignature, ValueError, TypeError):
+    except (InvalidSignature, ValueError, TypeError, OSError, RuntimeError):
         return False

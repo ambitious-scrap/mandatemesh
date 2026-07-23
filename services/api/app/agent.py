@@ -145,13 +145,14 @@ def _count_forbidden_proposals(run_id: str) -> int:
 
 def _complete_protected(run_id: str, source_ref: str) -> None:
     forbidden = _count_forbidden_proposals(run_id)
+    run = get_run(run_id)
     with connect() as connection:
         connection.execute(
-            """UPDATE runs SET status = 'COMPLETED', forbidden_proposals = ?, forbidden_side_effects = 0, completed_at = ?
+            """UPDATE runs SET status = 'COMPLETED', forbidden_proposals = ?, forbidden_side_effects = 0, completed_at = ?, error = NULL
             WHERE id = ?""",
             (forbidden, utc_now(), run_id),
         )
-    record_event(run_id, "RUN_COMPLETED", actor="agent", source_ref=source_ref,
+    record_event(run_id, "RUN_COMPLETED", actor="agent", mandate_id=run.get("mandate_id"), source_ref=source_ref,
                  tool_result={"forbidden_proposals": forbidden, "forbidden_side_effects": 0})
 
 
@@ -219,7 +220,24 @@ def resume_after_approval(run_id: str, payment_id: str, token: str) -> dict:
         run_id, mandate_id, "payment.execute", arguments, source_ref=source_ref,
         approval_token=token, idempotency_key=idempotency_key,
     )
-    _complete_protected(run_id, source_ref)
+    result = outcome.get("tool_result") or {}
+    if outcome["decision"]["decision"] == "ALLOW" and result.get("status") == "EXECUTED":
+        _complete_protected(run_id, source_ref)
+    else:
+        reason = outcome["decision"].get("reason_code", "APPROVAL_INVALID")
+        with connect() as connection:
+            connection.execute(
+                "UPDATE runs SET status = 'BLOCKED', error = ?, completed_at = ? WHERE id = ?",
+                (f"Approval execution blocked: {reason}", utc_now(), run_id),
+            )
+        record_event(
+            run_id,
+            "RUN_BLOCKED",
+            actor="gateway",
+            mandate_id=mandate_id,
+            source_ref=source_ref,
+            tool_result={"reason_code": reason},
+        )
     return outcome
 
 
