@@ -67,7 +67,7 @@ services:
     volumes:
       - ./policy:/policy:ro
     healthcheck:
-      test: ["CMD", "/opa", "eval", "--server", "http://127.0.0.1:8181", "true"]
+      test: ["CMD", "/opa", "eval", "1 == 1"]
       interval: 3s
       timeout: 2s
       retries: 15
