@@ -308,14 +308,53 @@ def reset_domain_state() -> None:
         _seed_trusted_state(connection)
 
 
-def reset_db() -> None:
-    """Reset interactive demo state but retain completed evaluation history."""
+def _state_counts(connection: sqlite3.Connection) -> dict[str, int]:
+    tables = (
+        "vendors",
+        "payments",
+        "memory_entries",
+        "runs",
+        "tool_events",
+        "mandates",
+        "approval_requests",
+        "approval_tokens",
+        "evaluation_runs",
+        "evaluation_results",
+    )
+    return {
+        table: int(connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+        for table in tables
+    }
+
+
+def reset_db(*, preserve_evaluations: bool = True) -> dict:
+    """Restore a deterministic demo state and return an auditable summary.
+
+    The default keeps completed Level 2 reports so judges can inspect prior
+    evidence after an interactive reset. ``preserve_evaluations=False`` is the
+    clean-room reset used by reliability tests and pre-demo rehearsal. The
+    persistent Ed25519 key lives outside SQLite and is intentionally untouched.
+    """
     init_db()
     with connect() as connection:
-        connection.execute(
-            "DELETE FROM tool_events WHERE run_id IN (SELECT id FROM runs WHERE evaluation_run_id IS NULL)"
-        )
-        connection.execute("DELETE FROM runs WHERE evaluation_run_id IS NULL")
+        connection.execute("BEGIN IMMEDIATE")
+        if preserve_evaluations:
+            # Keep only evidence attached to evaluation runs. This also removes
+            # mandate-lifecycle events whose run_id is a mandate id rather than
+            # a row in runs, closing the stale-event gap in the older reset.
+            connection.execute(
+                """DELETE FROM tool_events
+                WHERE run_id NOT IN (
+                    SELECT id FROM runs WHERE evaluation_run_id IS NOT NULL
+                )"""
+            )
+            connection.execute("DELETE FROM runs WHERE evaluation_run_id IS NULL")
+        else:
+            connection.execute("DELETE FROM tool_events")
+            connection.execute("DELETE FROM evaluation_results")
+            connection.execute("DELETE FROM evaluation_runs")
+            connection.execute("DELETE FROM runs")
+
         for table in (
             "approval_tokens",
             "approval_requests",
@@ -325,13 +364,26 @@ def reset_db() -> None:
             "secrets",
         ):
             connection.execute(f"DELETE FROM {table}")
-        connection.execute(
-            """DELETE FROM mandates WHERE id NOT IN (
-            SELECT mandate_id FROM runs
-            WHERE evaluation_run_id IS NOT NULL AND mandate_id IS NOT NULL
-            )"""
-        )
+
+        if preserve_evaluations:
+            connection.execute(
+                """DELETE FROM mandates WHERE id NOT IN (
+                SELECT mandate_id FROM runs
+                WHERE evaluation_run_id IS NOT NULL AND mandate_id IS NOT NULL
+                )"""
+            )
+        else:
+            connection.execute("DELETE FROM mandates")
+
         _seed_trusted_state(connection)
+        counts = _state_counts(connection)
+
+    return {
+        "status": "reset",
+        "scope": "demo" if preserve_evaluations else "all",
+        "signing_key_preserved": True,
+        "counts": counts,
+    }
 
 
 def rows(query: str, parameters: tuple = ()) -> list[dict]:

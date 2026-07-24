@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import socket
 import time
+import urllib.error
 import urllib.request
 import uuid
 
@@ -23,6 +25,19 @@ def _resolve(arguments: dict, context: dict) -> dict:
         key: context.get(value.removeprefix("$"), value) if isinstance(value, str) and value.startswith("$") else value
         for key, value in arguments.items()
     }
+
+
+def _model_failure_code(error: Exception) -> str:
+    """Map provider failures to stable, non-sensitive evidence codes."""
+    if isinstance(error, RuntimeError) and str(error) == "MODEL_API_KEY is not configured":
+        return "MODEL_NOT_CONFIGURED"
+    if isinstance(error, (TimeoutError, socket.timeout)):
+        return "MODEL_TIMEOUT"
+    if isinstance(error, urllib.error.HTTPError):
+        return "MODEL_HTTP_ERROR"
+    if isinstance(error, (json.JSONDecodeError, KeyError, TypeError, ValueError, IndexError)):
+        return "MODEL_RESPONSE_INVALID"
+    return "MODEL_UNAVAILABLE"
 
 
 def deterministic_plan(scenario: dict, run_id: str) -> list[dict]:
@@ -65,14 +80,24 @@ def live_model_plan(scenario: dict, task: str, run_id: str) -> list[dict]:
         headers={"Authorization": f"Bearer {config.MODEL_API_KEY}", "Content-Type": "application/json"},
     )
     with urllib.request.urlopen(request, timeout=config.MODEL_TIMEOUT_SECONDS) as response:
-        payload = json.loads(response.read())
-    calls = json.loads(payload["choices"][0]["message"]["content"])["tool_calls"]
+        payload = json.loads(response.read().decode("utf-8"))
+    content = payload["choices"][0]["message"]["content"]
+    parsed = json.loads(content) if isinstance(content, str) else content
+    calls = parsed["tool_calls"]
     if not isinstance(calls, list) or not calls:
-        raise RuntimeError("Model returned no tool calls")
+        raise ValueError("Model returned no tool calls")
     normalized = []
+    allowed_tools = {
+        "invoice.read", "vendor.lookup", "vendor.create", "secret.read",
+        "payment.prepare", "payment.execute", "memory.write",
+    }
     for index, call in enumerate(calls[:10]):
+        if not isinstance(call, dict) or call.get("tool_name") not in allowed_tools:
+            raise ValueError("Model returned an unsupported tool call")
         arguments = call.get("arguments", {})
-        if call.get("tool_name") in {"vendor.create", "payment.prepare", "payment.execute", "memory.write"}:
+        if not isinstance(arguments, dict):
+            raise ValueError("Model returned malformed tool arguments")
+        if call["tool_name"] in {"vendor.create", "payment.prepare", "payment.execute", "memory.write"}:
             arguments.setdefault("idempotency_key", f"live-{run_id}-{index}")
         normalized.append({"tool_name": call["tool_name"], "arguments": arguments})
     if normalized[0]["tool_name"] != "invoice.read":
@@ -195,11 +220,19 @@ def execute_protected_run(run_id: str) -> None:
                 context["last_payment_id"] = outcome["tool_result"]["id"]
 
         _complete_protected(run_id, source_ref)
-    except Exception as error:
+    except Exception:
+        safe_message = "Protected run failed safely. Reset the demo and retry."
         with connect() as connection:
             connection.execute("UPDATE runs SET status = 'FAILED', error = ?, completed_at = ? WHERE id = ?",
-                               (str(error), utc_now(), run_id))
-        record_event(run_id, "RUN_FAILED", actor="agent", source_ref=source_ref, tool_result={"error": str(error)})
+                               (safe_message, utc_now(), run_id))
+        record_event(
+            run_id,
+            "RUN_FAILED",
+            actor="agent",
+            mandate_id=mandate_id,
+            source_ref=source_ref,
+            tool_result={"reason_code": "RUN_INTERNAL_ERROR", "message": safe_message},
+        )
 
 
 def resume_after_approval(run_id: str, payment_id: str, token: str) -> dict:
@@ -260,7 +293,17 @@ def execute_run(run_id: str) -> None:
         except Exception as model_error:
             execution_mode = "deterministic_fallback"
             plan = deterministic_plan(scenario, run_id)
-            record_event(run_id, "MODEL_FALLBACK", actor="agent", source_ref=source_ref, tool_result={"reason": str(model_error)})
+            record_event(
+                run_id,
+                "MODEL_FALLBACK",
+                actor="agent",
+                source_ref=source_ref,
+                tool_result={
+                    "reason_code": _model_failure_code(model_error),
+                    "fallback_mode": "deterministic",
+                    "authorization_semantics": "unchanged",
+                },
+            )
         with connect() as connection:
             connection.execute("UPDATE runs SET execution_mode = ? WHERE id = ?", (execution_mode, run_id))
 
@@ -295,8 +338,15 @@ def execute_run(run_id: str) -> None:
                 (forbidden_proposals, forbidden_side_effects, completed_at, run_id),
             )
         record_event(run_id, "RUN_COMPLETED", actor="agent", source_ref=source_ref, tool_result={"forbidden_proposals": forbidden_proposals, "forbidden_side_effects": forbidden_side_effects})
-    except Exception as error:
+    except Exception:
+        safe_message = "Run failed safely. Reset the demo and retry."
         with connect() as connection:
-            connection.execute("UPDATE runs SET status = 'FAILED', error = ?, completed_at = ? WHERE id = ?", (str(error), utc_now(), run_id))
-        record_event(run_id, "RUN_FAILED", actor="agent", source_ref=source_ref, tool_result={"error": str(error)})
+            connection.execute("UPDATE runs SET status = 'FAILED', error = ?, completed_at = ? WHERE id = ?", (safe_message, utc_now(), run_id))
+        record_event(
+            run_id,
+            "RUN_FAILED",
+            actor="agent",
+            source_ref=source_ref,
+            tool_result={"reason_code": "RUN_INTERNAL_ERROR", "message": safe_message},
+        )
 

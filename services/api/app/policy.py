@@ -11,6 +11,7 @@ degraded policy engine.
 """
 from __future__ import annotations
 
+import http.client
 import json
 import urllib.error
 import urllib.request
@@ -52,12 +53,18 @@ def query_decision(policy_input: dict) -> dict:
     try:
         with urllib.request.urlopen(request, timeout=OPA_TIMEOUT_SECONDS) as response:
             if response.status != 200:
-                return _fail_closed(f"Policy engine returned HTTP {response.status}.")
-            payload = json.loads(response.read())
-    except (urllib.error.URLError, TimeoutError, OSError) as error:
-        return _fail_closed(f"Policy engine unreachable: {error}.")
-    except (json.JSONDecodeError, ValueError) as error:
-        return _fail_closed(f"Policy engine returned an unreadable body: {error}.")
+                return _fail_closed("Policy service unavailable; consequential action blocked.")
+            payload = json.loads(response.read().decode("utf-8"))
+    except (
+        urllib.error.HTTPError,
+        urllib.error.URLError,
+        TimeoutError,
+        OSError,
+        http.client.IncompleteRead,
+    ):
+        return _fail_closed("Policy service unavailable; consequential action blocked.")
+    except (json.JSONDecodeError, UnicodeDecodeError, ValueError, TypeError):
+        return _fail_closed("Policy service returned an invalid decision; consequential action blocked.")
 
     decision = payload.get("result") if isinstance(payload, dict) else None
     if not _valid(decision):
@@ -72,5 +79,5 @@ def opa_healthy() -> bool:
     try:
         with urllib.request.urlopen(f"{OPA_URL}/health", timeout=OPA_TIMEOUT_SECONDS) as response:
             return response.status == 200
-    except (urllib.error.URLError, TimeoutError, OSError):
+    except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, OSError, ValueError):
         return False

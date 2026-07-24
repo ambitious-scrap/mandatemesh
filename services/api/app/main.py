@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 import json
 import sqlite3
 import threading
@@ -9,11 +10,10 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
-from . import approvals, crypto, evaluation, gateway, mandates, mcp, memory, policy
+from . import approvals, crypto, evaluation, gateway, mandates, mcp, memory, policy, runtime
 from .agent import create_run, execute_run, get_run, resume_after_approval
-from .config import OPA_URL
 from .database import DB_PATH, connect, init_db, reset_db, rows, utc_now
-from .events import get_event, list_events, record_event
+from .events import get_event, list_events, list_events_after, record_event
 from .scenarios import get_scenario, list_scenarios
 from .schemas import (
     CompileRequest,
@@ -26,7 +26,16 @@ from .schemas import (
 )
 
 
-app = FastAPI(title="MandateMesh Level 3 API", version="3.0.0")
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    init_db()
+    crypto.ensure_key()
+    if not rows("SELECT id FROM vendors LIMIT 1"):
+        reset_db()
+    yield
+
+
+app = FastAPI(title="MandateMesh Demo-Ready API", version="4.0.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
@@ -36,39 +45,29 @@ app.add_middleware(
 )
 
 
-@app.on_event("startup")
-def startup() -> None:
-    init_db()
-    crypto.ensure_key()
-    if not rows("SELECT id FROM vendors LIMIT 1"):
-        reset_db()
-
-
 @app.get("/health")
-def health() -> dict:
-    with connect() as connection:
-        connection.execute("CREATE TEMP TABLE IF NOT EXISTS health_probe (ok INTEGER)")
-    opa_reachable = policy.opa_healthy()
-    return {
-        "status": "ok" if opa_reachable else "degraded",
-        "database": "writable",
-        "journal_mode": "wal",
-        "database_path": str(DB_PATH),
-        "protected_ready": opa_reachable,
-        "opa": {"url": OPA_URL, "reachable": opa_reachable},
+def health() -> JSONResponse:
+    """Process liveness. OPA outages degrade the payload but not the API process."""
+    status = runtime.system_status()
+    payload = {
+        "status": "ok" if status["database"]["writable"] else "unhealthy",
+        "journal_mode": status["database"]["journal_mode"],
+        **status,
     }
+    return JSONResponse(status_code=200 if status["database"]["writable"] else 503, content=payload)
 
 
 @app.get("/ready")
 def ready() -> JSONResponse:
-    opa_reachable = policy.opa_healthy()
-    payload = {
-        "status": "ready" if opa_reachable else "not_ready",
-        "database": "writable",
-        "protected_ready": opa_reachable,
-        "opa": {"url": OPA_URL, "reachable": opa_reachable},
-    }
-    return JSONResponse(status_code=200 if opa_reachable else 503, content=payload)
+    """Protected-stack readiness: writable database plus reachable OPA."""
+    status = runtime.system_status()
+    payload = {"status": "ready" if status["protected_ready"] else "not_ready", **status}
+    return JSONResponse(status_code=200 if status["protected_ready"] else 503, content=payload)
+
+
+@app.get("/api/runtime")
+def runtime_status() -> dict:
+    return runtime.system_status()
 
 
 # --------------------------------------------------------------------------- #
@@ -241,35 +240,58 @@ def run_status(run_id: str) -> dict:
 
 
 @app.get("/api/runs/{run_id}/events")
-def run_events(run_id: str) -> list[dict]:
+def run_events(run_id: str, after: str | None = None) -> list[dict]:
     try:
         get_run(run_id)
     except KeyError as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
-    return list_events(run_id)
+    return list_events_after(run_id, after)
 
 
 @app.get("/api/runs/{run_id}/stream")
-async def run_stream(run_id: str) -> StreamingResponse:
+async def run_stream(run_id: str, request: Request, after: str | None = None) -> StreamingResponse:
     try:
         get_run(run_id)
     except KeyError as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
 
-    async def stream():
-        sent: set[str] = set()
-        while True:
-            for event in list_events(run_id):
-                if event["id"] not in sent:
-                    sent.add(event["id"])
-                    yield f"event: tool_event\ndata: {json.dumps(event)}\n\n"
-            run = get_run(run_id)
-            if run["status"] in {"COMPLETED", "FAILED", "BLOCKED", "REJECTED"}:
-                yield f"event: run_status\ndata: {json.dumps(run)}\n\n"
-                break
-            await asyncio.sleep(0.15)
+    last_event_id = request.headers.get("last-event-id") or after
 
-    return StreamingResponse(stream(), media_type="text/event-stream", headers={"Cache-Control": "no-cache"})
+    async def stream():
+        cursor = last_event_id
+        heartbeat_ticks = 0
+        last_status: str | None = None
+        yield "retry: 1000\n\n"
+        while True:
+            if await request.is_disconnected():
+                break
+            emitted = False
+            for event in list_events_after(run_id, cursor):
+                cursor = event["id"]
+                emitted = True
+                yield f"id: {event['id']}\nevent: tool_event\ndata: {json.dumps(event)}\n\n"
+            run = get_run(run_id)
+            if run["status"] != last_status:
+                last_status = run["status"]
+                emitted = True
+                yield f"event: run_status\ndata: {json.dumps(run)}\n\n"
+            if run["status"] in {"COMPLETED", "FAILED", "BLOCKED", "REJECTED"}:
+                break
+            heartbeat_ticks = 0 if emitted else heartbeat_ticks + 1
+            if heartbeat_ticks >= 30:
+                yield ": keep-alive\n\n"
+                heartbeat_ticks = 0
+            await asyncio.sleep(0.2)
+
+    return StreamingResponse(
+        stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -357,7 +379,7 @@ def evaluation_run(request: EvaluationRunRequest) -> dict:
     try:
         return evaluation.run_evaluation()
     except Exception as error:
-        raise HTTPException(status_code=500, detail=f"Evaluation failed: {error}") from error
+        raise HTTPException(status_code=500, detail="Evaluation failed safely. Reset the demo and retry.") from error
 
 
 @app.get("/api/evaluation/{evaluation_run_id}")
@@ -489,9 +511,11 @@ def memory_entries() -> list[dict]:
 
 
 @app.post("/api/reset")
-def reset() -> dict:
+def reset(scope: str = "demo") -> dict:
+    if scope not in {"demo", "all"}:
+        raise HTTPException(status_code=400, detail="Reset scope must be 'demo' or 'all'.")
     try:
-        reset_db()
+        summary = reset_db(preserve_evaluations=scope == "demo")
     except sqlite3.Error as error:
-        raise HTTPException(status_code=500, detail=f"Reset failed: {error}") from error
-    return {"status": "reset", "state": state()}
+        raise HTTPException(status_code=500, detail="Reset failed safely; no partial demo state was returned.") from error
+    return {**summary, "state": state()}

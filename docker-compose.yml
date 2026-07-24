@@ -6,6 +6,7 @@ services:
       args:
         NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
     restart: unless-stopped
+    init: true
     ports:
       - "3000:3000"
     depends_on:
@@ -22,18 +23,21 @@ services:
       context: .
       dockerfile: services/api/Dockerfile
     restart: unless-stopped
+    init: true
     environment:
       MANDATEMESH_DATA_DIR: /app/data
       MANDATEMESH_KEY_PATH: ${MANDATEMESH_KEY_PATH:-/app/data/demo-principal-ed25519.key}
       MODEL_API_KEY: ${MODEL_API_KEY:-}
       MODEL_BASE_URL: ${MODEL_BASE_URL:-https://api.openai.com/v1}
       MODEL_NAME: ${MODEL_NAME:-gpt-4.1-mini}
+      MODEL_TIMEOUT_SECONDS: ${MODEL_TIMEOUT_SECONDS:-12}
       OPA_URL: ${OPA_URL:-http://opa:8181}
+      OPA_TIMEOUT_SECONDS: ${OPA_TIMEOUT_SECONDS:-5}
     ports:
       - "8000:8000"
     depends_on:
       opa:
-        condition: service_started
+        condition: service_healthy
     volumes:
       - mandatemesh-data:/app/data
     healthcheck:
@@ -51,6 +55,7 @@ services:
   opa:
     image: openpolicyagent/opa:1.4.2
     restart: unless-stopped
+    init: true
     # Policy decision point. Internal network only — no host port is published,
     # so only the trusted API/gateway can reach it. The agent never gets here.
     command:
@@ -61,6 +66,12 @@ services:
       - "/policy/mandate.rego"
     volumes:
       - ./policy:/policy:ro
+    healthcheck:
+      test: ["CMD", "/opa", "eval", "--server", "http://127.0.0.1:8181", "true"]
+      interval: 3s
+      timeout: 2s
+      retries: 15
+      start_period: 2s
 
 volumes:
   mandatemesh-data:
