@@ -20,6 +20,10 @@ accounts-payable agent, driven by the same invoices, can be run two ways:
   quarantined evidence but excluded from trusted retrieval, and a conservative
   semantic compiler explains extracted constraints, confidence, ambiguity, and
   mandatory human review before signing.
+- **Level 4 — Demo readiness.** One-command startup, deterministic reset,
+  offline model fallback, truthful readiness, fail-closed outage recovery, and
+  resumable event streams make the complete proof reliable under presentation
+  conditions without changing authorization semantics.
 
 Two invoices drive the same agent:
 
@@ -33,6 +37,8 @@ screens. Level 0 shows the attack landing in SQLite; Level 1 shows the gateway
 refusing each forbidden action and executing only the approved payment; Level 2
 runs and explains the complete fixed corpus; Level 3 proves MCP transport parity,
 memory quarantine, and explainable mandate compilation without developer tools.
+Level 4 keeps those same screens and adds a compact five-minute guide, runtime
+readiness, deterministic recovery, and refresh-safe evidence streaming.
 
 > This README covers **setup and usage only**. For the product rationale, threat
 > model, and level roadmap see [`PRODUCT_SPEC.md`](./PRODUCT_SPEC.md) and
@@ -47,10 +53,10 @@ memory quarantine, and explainable mandate compilation without developer tools.
 ├── apps/web/                # Next.js 16 frontend (protected + unprotected UI)
 ├── services/api/            # FastAPI backend
 │   ├── app/                 # agent, gateway, evidence, evaluation, policy, routes
-│   └── tests/               # pytest suite (Levels 0–3)
+│   └── tests/               # pytest suite (Levels 0–4)
 ├── policy/                  # OPA/Rego policy (mandate.rego) and Rego tests
 ├── scenarios/invoices/      # normal.json and malicious.json source invoices
-├── scripts/                 # seed/reset and Level 0/1/2/3 smoke helpers
+├── scripts/                 # seed/reset, demo check, and Level 0–4 smoke helpers
 ├── docker-compose.yml       # web + api + opa, health checks, persistent volume
 ├── .env.example             # copy to .env; safe placeholders only
 ├── PRODUCT_SPEC.md          # what/why (authoritative spec)
@@ -92,6 +98,7 @@ cp .env.example .env
 | `NEXT_PUBLIC_API_URL` | `http://localhost:8000` | Base URL the **browser** uses to reach the API. |
 | `MANDATEMESH_KEY_PATH` | `<data-dir>/demo-principal-ed25519.key` | Persistent random Ed25519 demo-principal key. Leave blank to use the data directory default. |
 | `OPA_URL` | `http://localhost:8181` | Policy decision point. Under Compose the API uses `http://opa:8181` automatically. |
+| `OPA_TIMEOUT_SECONDS` | `5` | Fail-closed timeout for policy decisions and readiness checks. |
 
 `.env` contains no secrets by default and is safe to keep local. Never commit a
 populated `.env`. On first startup the backend generates a random Ed25519 demo
@@ -187,14 +194,25 @@ The browser reads the API URL from `NEXT_PUBLIC_API_URL` (default
 
 ## Resetting demo state
 
-Reset clears the interactive demo runs, mandates, approvals, and side effects,
-then re-seeds the approved vendor and synthetic secret. Completed Level 2
-evaluation reports and their evidence remain available for judge review. Any of these work:
+The default **demo reset** clears interactive runs, mandates, approvals, payments,
+trusted/quarantined memory, compiler reports, and idempotency state, then re-seeds
+the approved vendor and synthetic secret. Completed Level 2 evaluation reports and
+their evidence remain available for judge review. The persistent random Ed25519
+signing key is intentionally preserved. Any of these work:
 
 - **In the UI** — click **Reset demo state**.
-- **Via the API** — `curl -X POST http://localhost:8000/api/reset`
+- **Via the API** — `curl -X POST 'http://localhost:8000/api/reset?scope=demo'`
 - **From the CLI (local)** — `python scripts/reset.py`
 - **From the CLI (Docker)** — `docker compose exec api python /app/scripts/reset.py`
+
+For a clean-room reset that also removes persisted evaluation history, use:
+
+```bash
+python scripts/reset.py --full
+curl -X POST 'http://localhost:8000/api/reset?scope=all'
+```
+
+Both reset scopes are idempotent and delete only database-managed demo state.
 
 ---
 
@@ -253,6 +271,7 @@ docker compose exec api python /app/scripts/smoke_test.py --repetitions 3
 docker compose exec api python /app/scripts/smoke_level1.py --repetitions 3
 docker compose exec api python /app/scripts/smoke_level2.py --repetitions 3
 docker compose exec api python /app/scripts/smoke_level3.py --repetitions 3
+docker compose exec api python /app/scripts/smoke_level4.py --repetitions 3
 ```
 
 ### Level 2 — fixed corpus and repeatability
@@ -278,6 +297,25 @@ compiler's limits, duration, confidence, and non-authoritative review report.
 ```bash
 python scripts/smoke_level3.py --repetitions 3
 ```
+
+### Level 4 — reliability and recovery
+
+`smoke_level4.py` performs a full reset twice, proves deterministic model
+fallback, forces an unavailable-policy path and verifies no side effect, restores
+the policy service, confirms protected recovery, checks resumable event delivery,
+and verifies database, protected-stack, and offline-demo readiness.
+
+```bash
+python scripts/smoke_level4.py --repetitions 3
+```
+
+Against a running stack, `demo_check.py` provides a fast pre-presentation gate:
+
+```bash
+python scripts/demo_check.py
+```
+
+It requires `/health`, `/ready`, `/api/runtime`, and scenario discovery to succeed.
 
 ---
 
@@ -374,6 +412,7 @@ Base URL: `http://localhost:8000`
 |--------|------|---------|
 | `GET`  | `/health` | Liveness/degraded status; unprotected mode remains inspectable without OPA. |
 | `GET`  | `/ready` | Protected-stack readiness; returns HTTP 503 when OPA is unavailable. |
+| `GET`  | `/api/runtime` | Database, OPA, model/fallback, protected, and offline-demo readiness. |
 | `GET`  | `/api/scenarios` | List available invoice scenarios. |
 | `POST` | `/api/mandates/compile` | Compile a human task into a non-authoritative draft plus confidence/warnings. |
 | `GET` | `/api/mandates/{id}/compiler-report` | Fetch the persisted semantic compiler report. |
@@ -384,7 +423,7 @@ Base URL: `http://localhost:8000`
 | `POST` | `/api/mandates/{id}/verify` | Verify signature / status / expiry. |
 | `POST` | `/api/mandates/{id}/tamper-demo` | Demonstrate post-signature mutation invalidating the signature. |
 | `POST` | `/api/runs` | Start a run (`202 Accepted`); `protection_mode` + `mandate_id` for protected runs. |
-| `GET`  | `/api/runs/{id}` · `/events` · `/stream` | Run status, event trail, and SSE stream. |
+| `GET`  | `/api/runs/{id}` · `/events?after=<event-id>` · `/stream` | Persisted run status and resumable SSE evidence stream. |
 | `POST` | `/api/gateway/execute` | Trusted gateway tool-call entry point (policy-checked). |
 | `GET` | `/api/events/{id}` | Fetch one complete execution-provenance event. |
 | `POST` | `/api/evaluation/run` | Run the fixed ten-scenario corpus from clean state. |
@@ -395,7 +434,7 @@ Base URL: `http://localhost:8000`
 | `GET` | `/api/memory/trusted` · `/api/memory/quarantine` | Trusted retrieval and quarantined evidence views. |
 | `POST` | `/api/level3/demo-session` · `GET /api/level3/status` | Create and inspect the combined Level 3 proof session. |
 | `GET`  | `/api/vendors` · `/api/payments` · `/api/memory-entries` | Persisted state views. |
-| `POST` | `/api/reset` | Reset and re-seed demo state. |
+| `POST` | `/api/reset?scope=demo|all` | Deterministically reset and re-seed demo state. |
 
 ---
 
@@ -406,3 +445,85 @@ Base URL: `http://localhost:8000`
 | Web UI | 3000 | http://localhost:3000 |
 | API | 8000 | http://localhost:8000 |
 | OPA | 8181 | internal only under Compose; `http://localhost:8181` when run locally |
+
+
+---
+
+## Final five-minute demo runbook
+
+Before presenting:
+
+```bash
+docker compose up --build -d
+python scripts/demo_check.py
+python scripts/reset.py
+```
+
+Then open http://localhost:3000 and use **Open 5-minute demo guide**:
+
+1. **Sign authority.** In Protected, compile the prefilled task, confirm the
+   contract, and sign it. Point out limits, forbidden actions, expiry, and valid
+   Ed25519 signature.
+2. **Show the attack.** Switch to Unprotected and run the malicious invoice. Show
+   the attacker payment, rogue vendor, poisoned memory, and redacted secret access.
+3. **Enforce and approve.** Return to Protected, run the same invoice, show the
+   gateway's `ALLOW`, `BLOCK`, and `REQUIRE_APPROVAL` decisions, then approve the
+   legitimate payment exactly once.
+4. **Prove integrity and breadth.** Run the tamper demonstration, then open
+   Evaluation and show 6/6 attacks prevented, 4/4 legitimate actions, observed
+   latency, provenance, and the stable repeatability key.
+5. **Show Level 3 briefly.** Open Level 3 and demonstrate that MCP shares the same
+   gateway, poisoned memory is quarantined and not retrievable, and the compiler
+   remains non-authoritative.
+
+Use deterministic mode for the primary presentation. A live-model attempt may
+fall back automatically; the UI labels fallback mode and authorization behavior
+remains unchanged.
+
+## Failure recovery and offline operation
+
+| Symptom | Expected behavior | Recovery |
+|---|---|---|
+| OPA is unavailable | `/health` stays live, `/ready` returns 503, protected actions block with `POLICY_UNAVAILABLE`, and no side effect occurs. | Restart OPA. The next protected request uses policy normally; no cached allow is used. |
+| Model key is absent, request times out, or response is malformed | A stable fallback reason is recorded and the deterministic plan runs. No provider exception is shown. | Continue the demo in deterministic fallback mode. |
+| Browser refreshes or SSE disconnects | The run ID and signed mandate are restored, persisted events reload, and SSE resumes after the last stable event ID. | Reopen the same workspace; do not rerun the action. |
+| Demo state is stale | The reset endpoint/CLI clears interactive state and re-seeds fixtures. | Click **RESET DEMO** or run `python scripts/reset.py`. |
+| Evaluation history must also be removed | Default reset intentionally preserves it. | Run `python scripts/reset.py --full`. |
+
+The offline presentation path needs no external model service. It uses bundled
+invoice fixtures, deterministic plans, SQLite, the local policy service, and the
+persistent demo signing key. Policy enforcement itself is never replaced by a
+Python fallback.
+
+## Rehearsal checklist
+
+Run these three rehearsals on the presentation machine:
+
+- **Normal:** start the full stack, reset, and complete the five-minute flow.
+- **Failure recovery:** refresh during a run or restart OPA, show fail-closed
+  behavior, then recover without editing code or the database.
+- **Offline:** remove the model key or disconnect external network access and
+  complete the same security proof using deterministic fallback.
+
+Before recording a backup demo, confirm the browser is at presentation zoom,
+notifications are disabled, the database is reset, all services are healthy,
+secret values remain redacted, the full flow is under five minutes, and the
+recording includes both the unprotected side effect and protected evidence. This
+repository does not claim that a recording exists; the checklist prepares the
+machine to create one.
+
+## Final verification commands
+
+```bash
+python -m pytest services/api/tests -q
+opa test policy
+python scripts/smoke_test.py --repetitions 3
+python scripts/smoke_level1.py --repetitions 3
+python scripts/smoke_level2.py --repetitions 3
+python scripts/smoke_level3.py --repetitions 3
+python scripts/smoke_level4.py --repetitions 3
+cd apps/web && npm run lint && npx tsc --noEmit && npm run build && npm audit
+cd ../.. && docker compose up --build -d
+python scripts/demo_check.py
+docker compose ps
+```

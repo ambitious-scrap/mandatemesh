@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from "react";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
@@ -156,6 +156,22 @@ type DemoState = {
   secret_accesses: Array<Record<string, unknown>>;
 };
 
+type RuntimeStatus = {
+  protected_ready: boolean;
+  offline_demo_ready: boolean;
+  database: { writable: boolean; journal_mode: string | null };
+  opa: { reachable: boolean; url: string };
+  model: {
+    provider_configured: boolean;
+    model: string | null;
+    fallback_available: boolean;
+    default_mode: string;
+    status: string;
+  };
+};
+
+type StreamState = "idle" | "connecting" | "live" | "recovering" | "complete";
+
 type EvaluationResult = {
   id: string;
   scenario_id: string;
@@ -222,6 +238,83 @@ function rupees(value: unknown) {
 
 function Evidence({ value }: { value: unknown }) {
   return <pre>{JSON.stringify(value, null, 2)}</pre>;
+}
+
+const TERMINAL_RUN_STATES = new Set(["COMPLETED", "FAILED", "BLOCKED", "REJECTED"]);
+
+function mergeEvents(current: ToolEvent[], incoming: ToolEvent[]) {
+  const merged = new Map(current.map((event) => [event.id, event]));
+  incoming.forEach((event) => merged.set(event.id, event));
+  return Array.from(merged.values()).sort((left, right) => left.created_at.localeCompare(right.created_at));
+}
+
+function useRunRecovery(
+  storageKey: string,
+  run: Run | null,
+  setRun: Dispatch<SetStateAction<Run | null>>,
+  setEvents: Dispatch<SetStateAction<ToolEvent[]>>,
+  onRunUpdate: (nextRun: Run) => void | Promise<void>,
+) {
+  const [streamState, setStreamState] = useState<StreamState>("idle");
+  const lastEventId = useRef<string | null>(null);
+  const updateRef = useRef(onRunUpdate);
+
+  useEffect(() => {
+    updateRef.current = onRunUpdate;
+  }, [onRunUpdate]);
+
+  useEffect(() => {
+    const storedRunId = window.localStorage.getItem(storageKey);
+    if (!storedRunId) return;
+    let cancelled = false;
+    Promise.all([
+      api<Run>(`/api/runs/${storedRunId}`),
+      api<ToolEvent[]>(`/api/runs/${storedRunId}/events`),
+    ]).then(([nextRun, nextEvents]) => {
+      if (cancelled) return;
+      setRun(nextRun);
+      setEvents(nextEvents);
+      lastEventId.current = nextEvents.at(-1)?.id ?? null;
+      setStreamState(TERMINAL_RUN_STATES.has(nextRun.status) ? "complete" : "connecting");
+      void updateRef.current(nextRun);
+    }).catch(() => {
+      if (!cancelled) {
+        window.localStorage.removeItem(storageKey);
+        setStreamState("idle");
+      }
+    });
+    return () => { cancelled = true; };
+  }, [setEvents, setRun, storageKey]);
+
+  useEffect(() => {
+    if (!run) return;
+    window.localStorage.setItem(storageKey, run.id);
+    if (TERMINAL_RUN_STATES.has(run.status)) return;
+
+    const suffix = lastEventId.current ? `?after=${encodeURIComponent(lastEventId.current)}` : "";
+    const source = new EventSource(`${API_URL}/api/runs/${run.id}/stream${suffix}`);
+    source.onopen = () => setStreamState("live");
+    source.addEventListener("tool_event", (message) => {
+      const event = JSON.parse((message as MessageEvent).data) as ToolEvent;
+      lastEventId.current = event.id;
+      setEvents((current) => mergeEvents(current, [event]));
+    });
+    source.addEventListener("run_status", (message) => {
+      const nextRun = JSON.parse((message as MessageEvent).data) as Run;
+      setRun(nextRun);
+      void updateRef.current(nextRun);
+      if (TERMINAL_RUN_STATES.has(nextRun.status)) {
+        setStreamState("complete");
+        source.close();
+      }
+    });
+    source.onerror = () => {
+      if (!TERMINAL_RUN_STATES.has(run.status)) setStreamState("recovering");
+    };
+    return () => source.close();
+  }, [run, setEvents, setRun, storageKey]);
+
+  return run && TERMINAL_RUN_STATES.has(run.status) ? "complete" : streamState;
 }
 
 function StateGrid({ state, executedTone }: { state: DemoState; executedTone: "danger" | "safe" }) {
@@ -291,6 +384,13 @@ function UnprotectedView() {
   const visibleEvents = events.filter((event) => !["RUN_STARTED", "RUN_COMPLETED"].includes(event.event_type));
 
   const refreshState = useCallback(async () => setState(await api<DemoState>("/api/state")), []);
+  const handleRunUpdate = useCallback(async (nextRun: Run) => {
+    if (nextRun.status !== "RUNNING") {
+      setBusy(false);
+      await refreshState();
+    }
+  }, [refreshState]);
+  const streamState = useRunRecovery("mandatemesh.unprotected.run", run, setRun, setEvents, handleRunUpdate);
 
   useEffect(() => {
     Promise.all([api<Scenario[]>("/api/scenarios"), api<DemoState>("/api/state")])
@@ -300,30 +400,6 @@ function UnprotectedView() {
       })
       .catch((cause) => setError(cause.message));
   }, []);
-
-  useEffect(() => {
-    if (!run || run.status !== "RUNNING") return;
-    const timer = window.setInterval(async () => {
-      try {
-        const [nextRun, nextEvents] = await Promise.all([
-          api<Run>(`/api/runs/${run.id}`),
-          api<ToolEvent[]>(`/api/runs/${run.id}/events`),
-        ]);
-        setRun(nextRun);
-        setEvents(nextEvents);
-        if (nextRun.status !== "RUNNING") {
-          window.clearInterval(timer);
-          await refreshState();
-          setBusy(false);
-        }
-      } catch (cause) {
-        window.clearInterval(timer);
-        setBusy(false);
-        setError(cause instanceof Error ? cause.message : "Run status failed");
-      }
-    }, 300);
-    return () => window.clearInterval(timer);
-  }, [run, refreshState]);
 
   async function startRun() {
     setBusy(true);
@@ -347,6 +423,7 @@ function UnprotectedView() {
     try {
       const result = await api<{ state: DemoState }>("/api/reset", { method: "POST" });
       setState(result.state);
+      window.localStorage.removeItem("mandatemesh.unprotected.run");
       setRun(null);
       setEvents([]);
     } catch (cause) {
@@ -369,6 +446,12 @@ function UnprotectedView() {
       </section>
 
       {error && <div className="error-banner" role="alert"><strong>System error</strong><span>{error}</span></div>}
+      {run?.execution_mode === "deterministic_fallback" && (
+        <div className="fallback-banner" role="status">
+          <strong>Offline fallback active</strong>
+          <span>The live provider was unavailable, so the cached deterministic plan completed the run. Authorization behavior is unchanged.</span>
+        </div>
+      )}
       {attackSucceeded && (
         <div className="attack-banner" role="status" aria-live="polite">
           <div><strong>Attack succeeded</strong><span>The agent crossed the user’s authority boundary.</span></div>
@@ -414,7 +497,7 @@ function UnprotectedView() {
           <div className="panel-heading evidence-heading">
             <span>02</span>
             <div><h2>Execution ledger</h2><p>Proposals, tool results, and committed effects.</p></div>
-            <div className={`run-state ${run?.status.toLowerCase() ?? "idle"}`}><i />{run?.status ?? "IDLE"}</div>
+            <div className={`run-state ${run?.status.toLowerCase() ?? "idle"}`}><i />{run?.status ?? "IDLE"}<small>{streamState}</small></div>
           </div>
 
           {visibleEvents.length === 0 ? (
@@ -508,6 +591,11 @@ function ProtectedView() {
     setState(nextState);
     setPending(nextPending);
   }, []);
+  const handleRunUpdate = useCallback(async (nextRun: Run) => {
+    await refresh();
+    if (nextRun.status !== "RUNNING") setBusy(false);
+  }, [refresh]);
+  const streamState = useRunRecovery("mandatemesh.protected.run", run, setRun, setEvents, handleRunUpdate);
 
   useEffect(() => {
     Promise.all([api<Scenario[]>("/api/scenarios"), api<DemoState>("/api/state"), api<ApprovalRequest[]>("/api/approvals/pending")])
@@ -520,30 +608,17 @@ function ProtectedView() {
   }, []);
 
   useEffect(() => {
-    if (!run || (run.status !== "RUNNING" && run.status !== "AWAITING_APPROVAL")) return;
-    const timer = window.setInterval(async () => {
-      try {
-        const [nextRun, nextEvents] = await Promise.all([
-          api<Run>(`/api/runs/${run.id}`),
-          api<ToolEvent[]>(`/api/runs/${run.id}/events`),
-        ]);
-        setRun(nextRun);
-        setEvents(nextEvents);
-        await refresh();
-        // Release the busy lock once the run leaves RUNNING so the approval
-        // controls become interactive while the run is paused for a decision.
-        if (nextRun.status !== "RUNNING") setBusy(false);
-        if (["COMPLETED", "FAILED", "BLOCKED", "REJECTED"].includes(nextRun.status)) {
-          window.clearInterval(timer);
-        }
-      } catch (cause) {
-        window.clearInterval(timer);
-        setBusy(false);
-        setError(cause instanceof Error ? cause.message : "Run status failed");
-      }
-    }, 350);
-    return () => window.clearInterval(timer);
-  }, [run, refresh]);
+    if (!run?.mandate_id || mandate?.id === run.mandate_id) return;
+    Promise.all([
+      api<Mandate>(`/api/mandates/${run.mandate_id}`),
+      api<Verification>(`/api/mandates/${run.mandate_id}/verify`, { method: "POST" }),
+    ]).then(([restoredMandate, restoredVerification]) => {
+      setMandate(restoredMandate);
+      setVerification(restoredVerification);
+      setSingle(restoredMandate.contract.max_single_payment);
+      setTotal(restoredMandate.contract.max_total_payment);
+    }).catch((cause) => setError(cause instanceof Error ? cause.message : "Could not restore the signed mandate"));
+  }, [mandate?.id, run?.mandate_id]);
 
   async function compile() {
     setBusy(true);
@@ -644,6 +719,7 @@ function ProtectedView() {
     try {
       const result = await api<{ state: DemoState }>("/api/reset", { method: "POST" });
       setState(result.state);
+      window.localStorage.removeItem("mandatemesh.protected.run");
       setMandate(null);
       setVerification(null);
       setRun(null);
@@ -805,7 +881,7 @@ function ProtectedView() {
           <div className="panel-heading evidence-heading">
             <span>03</span>
             <div><h2>Gateway decisions</h2><p>One deterministic policy decision per proposed action.</p></div>
-            <div className={`run-state ${run?.status.toLowerCase() ?? "idle"}`}><i />{run?.status?.replaceAll("_", " ") ?? "IDLE"}</div>
+            <div className={`run-state ${run?.status.toLowerCase() ?? "idle"}`}><i />{run?.status?.replaceAll("_", " ") ?? "IDLE"}<small>{streamState}</small></div>
           </div>
 
           {decisionEvents.length === 0 ? (
@@ -1273,7 +1349,45 @@ function DifferentiatorsView() {
 }
 
 export default function Home() {
-  const [boundary, setBoundary] = useState<"protected" | "unprotected" | "evaluation" | "level3">("protected");
+  const [boundary, setBoundary] = useState<"protected" | "unprotected" | "evaluation" | "level3">(() => {
+    if (typeof window === "undefined") return "protected";
+    const stored = window.localStorage.getItem("mandatemesh.screen");
+    return stored === "protected" || stored === "unprotected" || stored === "evaluation" || stored === "level3"
+      ? stored
+      : "protected";
+  });
+  const [runtimeStatus, setRuntimeStatus] = useState<RuntimeStatus | null>(null);
+  const [demoMode, setDemoMode] = useState(false);
+  const [resetting, setResetting] = useState(false);
+
+  const chooseBoundary = useCallback((next: "protected" | "unprotected" | "evaluation" | "level3") => {
+    setBoundary(next);
+    window.localStorage.setItem("mandatemesh.screen", next);
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    const refreshRuntime = () => api<RuntimeStatus>("/api/runtime")
+      .then((next) => { if (!cancelled) setRuntimeStatus(next); })
+      .catch(() => { if (!cancelled) setRuntimeStatus(null); });
+    void refreshRuntime();
+    const timer = window.setInterval(refreshRuntime, 5000);
+    return () => { cancelled = true; window.clearInterval(timer); };
+  }, []);
+
+  async function resetEverythingInteractive() {
+    setResetting(true);
+    try {
+      await api("/api/reset?scope=demo", { method: "POST" });
+      window.localStorage.removeItem("mandatemesh.unprotected.run");
+      window.localStorage.removeItem("mandatemesh.protected.run");
+      window.location.reload();
+    } finally {
+      setResetting(false);
+    }
+  }
+
   const subtitle = boundary === "level3"
     ? "Level 3 / advanced differentiators"
     : boundary === "evaluation"
@@ -1281,13 +1395,15 @@ export default function Home() {
       : boundary === "protected"
       ? "Level 1 / protected enforcement"
       : "Level 0 / unprotected execution";
-  const status = boundary === "level3"
-    ? "Three differentiators ready"
-    : boundary === "evaluation"
-      ? "Fixed corpus ready"
-      : boundary === "protected"
-      ? "Gateway enforcement active"
-      : "Direct tool access enabled";
+  const status = runtimeStatus && !runtimeStatus.protected_ready && boundary !== "unprotected"
+    ? "Policy unavailable · fail closed"
+    : boundary === "level3"
+      ? "Three differentiators ready"
+      : boundary === "evaluation"
+        ? "Fixed corpus ready"
+        : boundary === "protected"
+          ? "Gateway enforcement active"
+          : "Direct tool access enabled";
 
   return (
     <main>
@@ -1297,15 +1413,39 @@ export default function Home() {
           <p>{subtitle}</p>
         </div>
         <div className="mode-switch" role="group" aria-label="Product screen">
-          <button aria-pressed={boundary === "unprotected"} onClick={() => setBoundary("unprotected")}>Unprotected</button>
-          <button aria-pressed={boundary === "protected"} onClick={() => setBoundary("protected")}>Protected</button>
-          <button aria-pressed={boundary === "evaluation"} onClick={() => setBoundary("evaluation")}>Evaluation</button>
-          <button aria-pressed={boundary === "level3"} onClick={() => setBoundary("level3")}>Level 3</button>
+          <button aria-pressed={boundary === "unprotected"} onClick={() => chooseBoundary("unprotected")}>Unprotected</button>
+          <button aria-pressed={boundary === "protected"} onClick={() => chooseBoundary("protected")}>Protected</button>
+          <button aria-pressed={boundary === "evaluation"} onClick={() => chooseBoundary("evaluation")}>Evaluation</button>
+          <button aria-pressed={boundary === "level3"} onClick={() => chooseBoundary("level3")}>Level 3</button>
         </div>
-        <div className={`system-status ${boundary !== "unprotected" ? "protected" : ""}`}>
+        <div className={`system-status ${boundary !== "unprotected" && runtimeStatus?.protected_ready ? "protected" : ""}`}>
           <span aria-hidden="true" /> {status}
+          {runtimeStatus?.offline_demo_ready && runtimeStatus.model.status === "fallback_active" && <small>OFFLINE READY</small>}
         </div>
       </header>
+
+      <section className={`demo-console ${demoMode ? "open" : ""}`} aria-label="Five-minute demo controls">
+        <button className="demo-toggle" onClick={() => setDemoMode((current) => !current)} aria-expanded={demoMode}>
+          {demoMode ? "Hide demo guide" : "Open 5-minute demo guide"}
+        </button>
+        {demoMode && (
+          <div className="demo-steps">
+            <button onClick={() => chooseBoundary("protected")}><b>1</b><span>Sign mandate</span><small>0:35–1:05</small></button>
+            <button onClick={() => chooseBoundary("unprotected")}><b>2</b><span>Show attack</span><small>1:05–1:50</small></button>
+            <button onClick={() => chooseBoundary("protected")}><b>3</b><span>Enforce + approve</span><small>1:50–4:20</small></button>
+            <button onClick={() => chooseBoundary("evaluation")}><b>4</b><span>Show evidence</span><small>4:20–4:50</small></button>
+            <button onClick={() => chooseBoundary("level3")}><b>5</b><span>Prove extensibility</span><small>4:50–5:00</small></button>
+            <button className="demo-reset" onClick={resetEverythingInteractive} disabled={resetting}>{resetting ? "RESETTING…" : "RESET DEMO"}</button>
+          </div>
+        )}
+      </section>
+
+      {runtimeStatus && !runtimeStatus.protected_ready && boundary !== "unprotected" && (
+        <div className="readiness-banner" role="alert">
+          <strong>Protected execution is temporarily unavailable</strong>
+          <span>OPA is not ready. Consequential calls remain blocked with POLICY_UNAVAILABLE until the service recovers.</span>
+        </div>
+      )}
 
       {boundary === "level3" ? <DifferentiatorsView /> : boundary === "evaluation" ? <EvaluationView /> : boundary === "protected" ? <ProtectedView /> : <UnprotectedView />}
     </main>

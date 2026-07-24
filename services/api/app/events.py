@@ -81,5 +81,27 @@ def get_event(event_id: str) -> dict:
 
 
 def list_events(run_id: str) -> list[dict]:
-    result = rows("SELECT * FROM tool_events WHERE run_id = ? ORDER BY created_at, rowid", (run_id,))
+    result = rows("SELECT * FROM tool_events WHERE run_id = ? ORDER BY rowid", (run_id,))
+    return decode_json_fields(result, _JSON_FIELDS)
+
+
+def list_events_after(run_id: str, event_id: str | None) -> list[dict]:
+    """Return persisted events after ``event_id`` for SSE resume/reload recovery.
+
+    Unknown or stale event IDs deliberately fall back to the complete ledger;
+    clients deduplicate by the stable UUID. This favors evidence recovery over
+    silently skipping events after a browser cache or database reset.
+    """
+    if not event_id:
+        return list_events(run_id)
+    anchor = rows(
+        "SELECT rowid AS sequence FROM tool_events WHERE id = ? AND run_id = ?",
+        (event_id, run_id),
+    )
+    if not anchor:
+        return list_events(run_id)
+    result = rows(
+        "SELECT * FROM tool_events WHERE run_id = ? AND rowid > ? ORDER BY rowid",
+        (run_id, anchor[0]["sequence"]),
+    )
     return decode_json_fields(result, _JSON_FIELDS)
