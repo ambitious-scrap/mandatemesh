@@ -12,7 +12,7 @@ import sqlite3
 import time
 import uuid
 
-from . import actions, approvals, crypto, evidence, mandates, policy
+from . import actions, approvals, crypto, evidence, mandates, memory, policy
 from .canonical import canonical_json, sha256_hex
 from .database import connect, rows, utc_now
 from .events import record_event
@@ -176,6 +176,7 @@ def execute(
     source_ref: str | None = None,
     approval_token: str | None = None,
     idempotency_key: str | None = None,
+    transport: str = "REST",
 ) -> dict:
     started = time.perf_counter()
 
@@ -236,6 +237,7 @@ def execute(
         mandate_id=mandate_id,
         task_state={"committed_amount": committed_amount(mandate_id)},
         idempotency_key=idempotency_key,
+        transport=transport,
     )
     if canonical is None:
         return _block(
@@ -471,6 +473,52 @@ def execute(
             policy_input=policy_input, before_state=before_state,
         )
     if decision["decision"] != "ALLOW":
+        quarantine = None
+        if (
+            canonical_action == "memory.financial_instruction.write"
+            and decision.get("reason_code") == "MEMORY_WRITE_FORBIDDEN"
+        ):
+            try:
+                quarantine, quarantine_effect = memory.quarantine_attempt(
+                    run_id=run_id,
+                    mandate_id=mandate_id,
+                    arguments=arguments,
+                    reason_code=decision["reason_code"],
+                )
+                record_event(
+                    run_id,
+                    "MEMORY_QUARANTINED",
+                    actor="gateway",
+                    mandate_id=mandate_id,
+                    source_ref=source_ref,
+                    tool_name=tool_name,
+                    tool_arguments=arguments,
+                    canonical_action=canonical,
+                    decision=decision,
+                    side_effect=quarantine_effect,
+                    policy_input=policy_input,
+                    before_state=before_state,
+                    after_state=evidence.snapshot_resource(tool_name, arguments),
+                    policy_version=policy_version,
+                    is_forbidden=True,
+                )
+            except memory.MemoryError as error:
+                # Quarantine is evidence preservation, never an authorization
+                # fallback. The original policy BLOCK remains authoritative.
+                record_event(
+                    run_id,
+                    "MEMORY_QUARANTINE_FAILED",
+                    actor="gateway",
+                    mandate_id=mandate_id,
+                    source_ref=source_ref,
+                    tool_name=tool_name,
+                    tool_arguments=arguments,
+                    canonical_action=canonical,
+                    decision=decision,
+                    tool_result={"error": str(error)},
+                    policy_version=policy_version,
+                    is_forbidden=True,
+                )
         latency = round((time.perf_counter() - started) * 1000, 3)
         event = record_event(
             run_id,
@@ -490,7 +538,12 @@ def execute(
             latency_ms=latency,
         )
         _bump_blocked(run_id)
-        return {"decision": decision, "tool_result": None, "event_id": event["id"]}
+        return {
+            "decision": decision,
+            "tool_result": None,
+            "event_id": event["id"],
+            "quarantine": quarantine,
+        }
 
     return _execute_allowed(
         run_id,

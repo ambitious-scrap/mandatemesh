@@ -74,9 +74,11 @@ def smoke_once(iteration: int) -> dict:
     assert len(executed) == 1, executed
     assert executed[0]["vendor_id"] == "VENDOR-101"
 
-    # No forbidden side effect landed.
+    # No forbidden active side effect landed. The denied memory write is
+    # retained only as quarantined, non-retrievable evidence.
     assert not rows("SELECT id FROM vendors WHERE id = 'VENDOR-ATTACKER'")
-    assert not rows("SELECT id FROM memory_entries")
+    assert not rows("SELECT id FROM memory_entries WHERE status = 'ACTIVE'")
+    assert len(rows("SELECT id FROM memory_entries WHERE status = 'QUARANTINED'")) == 1
 
     # A replayed approval token (fresh idempotency key) is refused.
     from app import gateway  # noqa: E402

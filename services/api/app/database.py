@@ -60,7 +60,11 @@ CREATE TABLE IF NOT EXISTS memory_entries (
     trust_level TEXT NOT NULL,
     status TEXT NOT NULL,
     idempotency_key TEXT NOT NULL UNIQUE,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    quarantine_reason TEXT,
+    run_id TEXT,
+    mandate_id TEXT,
+    reviewed_at TEXT
 );
 CREATE TABLE IF NOT EXISTS tool_events (
     id TEXT PRIMARY KEY,
@@ -118,7 +122,8 @@ CREATE TABLE IF NOT EXISTS mandates (
     expires_at TEXT,
     nonce TEXT NOT NULL UNIQUE,
     created_at TEXT NOT NULL,
-    confirmed_at TEXT
+    confirmed_at TEXT,
+    compiler_report_json TEXT
 );
 CREATE TABLE IF NOT EXISTS approval_requests (
     id TEXT PRIMARY KEY,
@@ -219,6 +224,11 @@ _MIGRATIONS = (
     ("approval_tokens", "beneficiary_hash", "TEXT"),
     ("approval_tokens", "amount", "INTEGER"),
     ("approval_tokens", "currency", "TEXT"),
+    ("memory_entries", "quarantine_reason", "TEXT"),
+    ("memory_entries", "run_id", "TEXT"),
+    ("memory_entries", "mandate_id", "TEXT"),
+    ("memory_entries", "reviewed_at", "TEXT"),
+    ("mandates", "compiler_report_json", "TEXT"),
 )
 
 

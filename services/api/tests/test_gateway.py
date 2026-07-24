@@ -260,9 +260,11 @@ def test_full_protected_attack_flow(opa):
     assert len(executed) == 1
     assert executed[0]["vendor_id"] == "VENDOR-101"
 
-    # no forbidden side effects landed
+    # No forbidden active side effects landed. The denied memory write is
+    # preserved only as quarantined, non-retrievable evidence.
     assert not rows("SELECT id FROM vendors WHERE id = 'VENDOR-ATTACKER'")
-    assert not rows("SELECT id FROM memory_entries")
+    assert not rows("SELECT id FROM memory_entries WHERE status = 'ACTIVE'")
+    assert len(rows("SELECT id FROM memory_entries WHERE status = 'QUARANTINED'")) == 1
 
     # replay of the consumed token with a fresh idempotency key is blocked
     replay = _execute(rid, mid, granted["payment_id"], token=granted["token"], key=rid + "-replay")
